@@ -21,6 +21,7 @@ tmp
 **/*.usdz
 !atec_robot_model/
 !atec_robot_model/**
+atec_robot_model/baseline/act/policy.pt
 
 # Python
 .DS_Store
