@@ -86,7 +86,9 @@ class TaskAEnvG1Cfg(TaskAEnvCfg):
         joint_names = UNITREE_G1_29DOF_DEX1_CFG.joint_names
         self.observations.proprio.joint_pos.params["asset_cfg"].joint_names = joint_names
         self.observations.proprio.joint_vel.params["asset_cfg"].joint_names = joint_names
-        self.actions.joint_pos.joint_names = joint_names
+        self.actions.joint_pos_leg.joint_names = joint_names
+        self.actions.joint_vel_wheel = None
+        self.actions.joint_pos_arm = None
 
 
 @configclass
@@ -108,9 +110,16 @@ class TaskAEnvTron1Cfg(TaskAEnvCfg):
         ]
 
         joint_names = TRON1A_PIPER_CFG.joint_names
+        leg_joint_names = TRON1A_PIPER_CFG.leg_joint_names
+        wheel_joint_names = TRON1A_PIPER_CFG.wheel_joint_names
+        arm_joint_names = TRON1A_PIPER_CFG.arm_joint_names
+
         self.observations.proprio.joint_pos.params["asset_cfg"].joint_names = joint_names
         self.observations.proprio.joint_vel.params["asset_cfg"].joint_names = joint_names
-        self.actions.joint_pos.joint_names = joint_names
+
+        self.actions.joint_pos_leg.joint_names = leg_joint_names
+        self.actions.joint_vel_wheel.joint_names = wheel_joint_names
+        self.actions.joint_pos_arm.joint_names = arm_joint_names
 
 @configclass
 class TaskAEnvB2Cfg(TaskAEnvCfg):
@@ -132,10 +141,15 @@ class TaskAEnvB2Cfg(TaskAEnvCfg):
         ]
 
         joint_names = UNITREE_B2_PIPER_CFG.joint_names
+        leg_joint_names = UNITREE_B2_PIPER_CFG.leg_joint_names
+        arm_joint_names = UNITREE_B2_PIPER_CFG.arm_joint_names
+
         self.observations.proprio.joint_pos.params["asset_cfg"].joint_names = joint_names
         self.observations.proprio.joint_vel.params["asset_cfg"].joint_names = joint_names
 
-        self.actions.joint_pos.joint_names = joint_names
+        self.actions.joint_pos_leg.joint_names = leg_joint_names
+        self.actions.joint_pos_arm.joint_names = arm_joint_names
+        self.actions.joint_vel_wheel = None
 
 @configclass
 class TaskAEnvB2WCfg(TaskAEnvCfg):
@@ -157,7 +171,13 @@ class TaskAEnvB2WCfg(TaskAEnvCfg):
         ]
 
         joint_names = UNITREE_B2W_PIPER_CFG.joint_names
+        leg_joint_names = UNITREE_B2W_PIPER_CFG.leg_joint_names
+        wheel_joint_names = UNITREE_B2W_PIPER_CFG.wheel_joint_names
+        arm_joint_names = UNITREE_B2W_PIPER_CFG.arm_joint_names
+
         self.observations.proprio.joint_pos.params["asset_cfg"].joint_names = joint_names
         self.observations.proprio.joint_vel.params["asset_cfg"].joint_names = joint_names
 
-        self.actions.joint_pos.joint_names = joint_names
+        self.actions.joint_pos_leg.joint_names = leg_joint_names
+        self.actions.joint_vel_wheel.joint_names = wheel_joint_names
+        self.actions.joint_pos_arm.joint_names = arm_joint_names

@@ -83,7 +83,7 @@ class BaseSceneCfg(InteractiveSceneCfg):
         width=640,
         data_types=["rgb", "depth"],
         spawn=sim_utils.PinholeCameraCfg(
-            focal_length=24.0,
+            focal_length=15.0,
             horizontal_aperture=20.955,
             clipping_range=(0.05, 50.0),
         ),
@@ -100,7 +100,7 @@ class BaseSceneCfg(InteractiveSceneCfg):
         width=640,
         data_types=["rgb", "depth"],
         spawn=sim_utils.PinholeCameraCfg(
-            focal_length=24.0,
+            focal_length=15.0,
             horizontal_aperture=20.955,
             clipping_range=(0.05, 50.0),
         ),
@@ -133,8 +133,17 @@ class CommandsCfg:
 @configclass
 class ActionsCfg:
     """Action specifications for the MDP."""
-    joint_pos = mdp.JointPositionActionCfg(
-        asset_name="robot", joint_names=[".*"], scale=0.5, use_default_offset=True, preserve_order=True
+    # For leg joint
+    joint_pos_leg = mdp.JointPositionActionCfg(
+        asset_name="robot", joint_names=[""], scale=0.5, use_default_offset=True, clip=None, preserve_order=True
+    )
+    # For wheel joint
+    joint_vel_wheel = mdp.JointVelocityActionCfg(
+        asset_name="robot", joint_names=[""], scale=5.0, use_default_offset=True, clip=None, preserve_order=True
+    )
+    # For manipulator joint
+    joint_pos_arm = mdp.JointPositionActionCfg(
+        asset_name="robot", joint_names=[""], scale=0.5, use_default_offset=True, clip=None, preserve_order=True
     )
 
 

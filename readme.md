@@ -179,19 +179,55 @@ Observations include:
 
 #### Action Space
 
-All tasks use joint position control:
+Robot control actions are organized by joint type.
+
+- Leg joints and manipulator joints are controlled by joint position commands.
+- Wheel joints of wheeled robots are controlled by joint velocity commands.
+
+The action configuration is as follows:
 
 ```
-mdp.JointPositionActionCfg(
+joint_pos_leg = mdp.JointPositionActionCfg(
     asset_name="robot",
-    joint_names=[".*"],
+    joint_names=[""],
     scale=0.5,
     use_default_offset=True,
+    clip=None,
+    preserve_order=True,
+)
+
+joint_vel_wheel = mdp.JointVelocityActionCfg(
+    asset_name="robot",
+    joint_names=[""],
+    scale=5.0,
+    use_default_offset=True,
+    clip=None,
+    preserve_order=True,
+)
+
+joint_pos_arm = mdp.JointPositionActionCfg(
+    asset_name="robot",
+    joint_names=[""],
+    scale=0.5,
+    use_default_offset=True,
+    clip=None,
     preserve_order=True,
 )
 ```
 
-Actions are applied in joint space with consistent ordering across environments.
+##### Scaling rules
+
+- Leg position commands are scaled by 0.5 before being applied to the robot.
+- Arm position commands are scaled by 0.5 before being applied to the robot.
+- Wheel velocity commands are scaled by 5.0 before being applied to the robot.
+
+Different robots enable different action items according to their structure:
+
+- Standard legged robots
+  (humanoid robots, quadruped mobile manipulator robots, manipulator) do not enable wheel velocity control.
+- Wheeled legged robots
+  (Dual-wheel legged mobile manipulator robots, quadruped-wheel legged mobile manipulator robots)
+  enable wheel velocity control.
 
 ## Contributors
 - **[CUHK Legged Robot Lab](https://cuhkleggedrobotlab.github.io/)**

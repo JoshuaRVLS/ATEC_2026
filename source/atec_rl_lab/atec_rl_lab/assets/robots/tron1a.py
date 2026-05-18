@@ -10,11 +10,6 @@ from isaaclab.actuators import ImplicitActuatorCfg
 from atec_rl_lab.assets.robots.cfg import ATECArticulationCfg, CameraCfg
 from atec_rl_lab.assets import ATEC_ASSETS_MODEL_DIR
 
-
-def _quat_wxyz_from_euler(seq: str, angles) -> tuple[float, float, float, float]:
-    quat_xyzw = R.from_euler(seq, angles).as_quat()
-    return tuple(float(x) for x in (quat_xyzw[3], quat_xyzw[0], quat_xyzw[1], quat_xyzw[2]))
-
 """
 This file contains the configuration for the LIMX Tron1A robots.
 """
@@ -53,29 +48,33 @@ TRON1A_WHEEL_CFG = ATECArticulationCfg(
     ),
     soft_joint_pos_limit_factor=0.9,
     actuators={
-        "leg_wheels": ImplicitActuatorCfg(
+        "legs": ImplicitActuatorCfg(
             joint_names_expr=[
-                "abad_[L,R]_Joint",
-                "hip_[L,R]_Joint",
-                "knee_[L,R]_Joint",
-                "wheel_[L,R]_Joint",
+                "abad_L_Joint",
+                "abad_R_Joint",
+                "hip_L_Joint",
+                "hip_R_Joint",
+                "knee_L_Joint",
+                "knee_R_Joint",
             ],
-            effort_limit_sim=80.0,
-            velocity_limit_sim=15.0,
-            stiffness={
-                "abad_[L,R]_Joint": 40.0,
-                "hip_[L,R]_Joint": 40.0,
-                "knee_[L,R]_Joint": 40.0,
-                "wheel_[L,R]_Joint": 0.0,
-            },
-            damping={
-                "abad_[L,R]_Joint": 2.5,
-                "hip_[L,R]_Joint": 2.5,
-                "knee_[L,R]_Joint": 2.5,
-                "wheel_[L,R]_Joint": 0.8,
-            },
-            friction=0.002,
-            armature=0.002,
+            effort_limit=80.0,
+            velocity_limit=15.0,
+            stiffness=40.0,
+            damping=2.5,
+            friction=0.01,
+            armature=0.01,
+        ),
+        "wheels": ImplicitActuatorCfg(
+            joint_names_expr=[
+                "wheel_L_Joint",
+                "wheel_R_Joint",
+            ],
+            effort_limit=80.0,
+            velocity_limit=15.0,
+            stiffness=0.0,
+            damping=0.8,
+            friction=0.01,
+            armature=0.01,
         ),
     },
     base_link_name="base_Link",
@@ -83,7 +82,7 @@ TRON1A_WHEEL_CFG = ATECArticulationCfg(
     head_camera_link_name="base_Link",
     head_camera_offset=CameraCfg.OffsetCfg(
         pos=(0.12, 0.0, 0.0),
-        rot=_quat_wxyz_from_euler("xyz", [0.0, np.pi / 6, 0.0]),
+        rot=tuple(float(x) for x in R.from_euler("xyz", [0., np.pi/6, 0.]).as_quat(scalar_first=True)),
         convention="world",
     ),
 )
@@ -105,10 +104,21 @@ TRON1A_PIPER_CFG.actuators["arms"] = ImplicitActuatorCfg(
 )
 TRON1A_PIPER_CFG.ee_camera_link_name = "gripper_base"
 TRON1A_PIPER_CFG.ee_camera_offset = CameraCfg.OffsetCfg(
-    pos=(-0.05, 0.0, 0.0),
-    rot=_quat_wxyz_from_euler("xyz", [0.0, 0.0, -np.pi / 2]),
+    pos=(-0.05, 0.0, 0.06),
+    rot=tuple(float(x) for x in R.from_euler("xyz", [0., 0, -np.pi/2]).as_quat(scalar_first=True)),
     convention="ros",
 )
+TRON1A_PIPER_CFG.leg_joint_names = [
+    "abad_L_Joint", "hip_L_Joint", "knee_L_Joint",
+    "abad_R_Joint", "hip_R_Joint", "knee_R_Joint",
+]
+TRON1A_PIPER_CFG.wheel_joint_names = [
+    "wheel_L_Joint", "wheel_R_Joint",
+]
+TRON1A_PIPER_CFG.arm_joint_names = [
+    'arm_joint1', 'arm_joint2', 'arm_joint3', 'arm_joint4',
+    'arm_joint5', 'arm_joint6', 'arm_joint7', 'arm_joint8'
+]
 TRON1A_PIPER_CFG.joint_names = [
     "abad_L_Joint", "hip_L_Joint", "knee_L_Joint",
     "abad_R_Joint", "hip_R_Joint", "knee_R_Joint",

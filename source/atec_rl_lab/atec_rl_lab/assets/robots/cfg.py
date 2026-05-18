@@ -14,3 +14,6 @@ class ATECArticulationCfg(ArticulationCfg):
     head_camera_offset: CameraCfg.OffsetCfg = CameraCfg.OffsetCfg()
     ee_camera_offset: Optional[EECameraOffsetCfg] = None
     joint_names: list[str] = []
+    wheel_joint_names: list[str] = []
+    leg_joint_names: list[str] = []
+    arm_joint_names: list[str] = []

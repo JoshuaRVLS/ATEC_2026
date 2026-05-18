@@ -15,11 +15,6 @@ from isaaclab.sensors import CameraCfg
 from atec_rl_lab.assets import ATEC_ASSETS_MODEL_DIR
 from scipy.spatial.transform import Rotation as R
 
-
-def _quat_wxyz_from_euler(seq: str, angles) -> tuple[float, float, float, float]:
-    quat_xyzw = R.from_euler(seq, angles).as_quat()
-    return tuple(float(x) for x in (quat_xyzw[3], quat_xyzw[0], quat_xyzw[1], quat_xyzw[2]))
-
 B2_USD_PATH = os.path.join(ATEC_ASSETS_MODEL_DIR, "robot/b2/b2.usd")
 B2_PIPER_USD_PATH = os.path.join(ATEC_ASSETS_MODEL_DIR, "robot/b2/b2_piper.usda")
 
@@ -76,7 +71,7 @@ UNITREE_B2_CFG = ATECArticulationCfg(
     soft_joint_pos_limit_factor=0.9,
     head_camera_offset=CameraCfg.OffsetCfg(
         pos=(0.4216099977493286, 0.02500000037252903, 0.06185099855065346),
-        rot=_quat_wxyz_from_euler("xyz", [0.0, np.pi / 6, 0.0]),
+        rot=tuple(float(x) for x in R.from_euler("xyz", [0.0, np.pi / 6, 0.0]).as_quat(scalar_first=True)),
         convention="world",
     ),
 )
@@ -95,10 +90,21 @@ UNITREE_B2_PIPER_CFG.actuators["arms"] = ImplicitActuatorCfg(
 )
 UNITREE_B2_PIPER_CFG.ee_camera_link_name = "gripper_base"
 UNITREE_B2_PIPER_CFG.ee_camera_offset = CameraCfg.OffsetCfg(
-    pos=(-0.05, 0.0, 0.0),
-    rot=_quat_wxyz_from_euler("xyz", [0.0, 0.0, -np.pi / 2]),
+    pos=(-0.05, 0.0, 0.06),
+    rot=tuple(float(x) for x in R.from_euler("xyz", [0.0, 0.0, -np.pi / 2]).as_quat(scalar_first=True)),
     convention="ros",
 )
+
+UNITREE_B2_PIPER_CFG.leg_joint_names = [
+    "FR_hip_joint", "FR_thigh_joint", "FR_calf_joint",
+    "FL_hip_joint", "FL_thigh_joint", "FL_calf_joint",
+    "RR_hip_joint", "RR_thigh_joint", "RR_calf_joint",
+    "RL_hip_joint", "RL_thigh_joint", "RL_calf_joint",
+]
+UNITREE_B2_PIPER_CFG.arm_joint_names = [
+    'arm_joint1', 'arm_joint2', 'arm_joint3', 'arm_joint4',
+    'arm_joint5', 'arm_joint6', 'arm_joint7', 'arm_joint8'
+]
 UNITREE_B2_PIPER_CFG.joint_names = [
     "FR_hip_joint", "FR_thigh_joint", "FR_calf_joint",
     "FL_hip_joint", "FL_thigh_joint", "FL_calf_joint",

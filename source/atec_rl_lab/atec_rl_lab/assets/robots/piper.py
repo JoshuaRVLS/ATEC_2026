@@ -9,11 +9,6 @@ from isaaclab.sensors import CameraCfg
 from scipy.spatial.transform import Rotation as R
 import numpy as np
 
-
-def _quat_wxyz_from_euler(seq: str, angles) -> tuple[float, float, float, float]:
-    quat_xyzw = R.from_euler(seq, angles).as_quat()
-    return tuple(float(x) for x in (quat_xyzw[3], quat_xyzw[0], quat_xyzw[1], quat_xyzw[2]))
-
 PIPER_USD_PATH = os.path.join(ATEC_ASSETS_MODEL_DIR, "robot/piper/piper.usd")
 
 """Configuration of Piper robot from Agilex.
@@ -57,8 +52,8 @@ PIPER_CFG = ATECArticulationCfg(
     },
     ee_camera_link_name = "gripper_base",
     ee_camera_offset = CameraCfg.OffsetCfg(
-        pos=(-0.05, 0.0, 0.0),
-        rot=_quat_wxyz_from_euler("xyz", [0.0, 0.0, -np.pi / 2]),
+        pos=(-0.05, 0.0, 0.06),
+        rot=tuple(float(x) for x in R.from_euler("xyz", [0.0, 0.0, -np.pi / 2]).as_quat(scalar_first=True)),
         convention="ros",
     ),
     head_camera_link_name = None
