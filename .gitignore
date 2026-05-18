@@ -1,4 +1,3 @@
-atec_robot_model
 .vscode
 .idea
 video
@@ -20,6 +19,8 @@ tmp
 **/*.usda
 **/*.usdc
 **/*.usdz
+!atec_robot_model/
+!atec_robot_model/**
 
 # Python
 .DS_Store
@@ -80,4 +81,3 @@ tests/
 # TacSL sensor
 **/tactile_record/*
 **/gelsight_r15_data/*
-

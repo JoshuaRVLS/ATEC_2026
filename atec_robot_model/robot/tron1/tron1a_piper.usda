@@ -1,0 +1,857 @@
+#usda 1.0
+(
+    customLayerData = {
+        dictionary cameraSettings = {
+            dictionary Front = {
+                double3 position = (5, 0, 0)
+                double radius = 5
+            }
+            dictionary Perspective = {
+                double3 position = (1.1617260355067076, 2.346695130216007, 0.641705427903431)
+                double3 target = (-0.19858167744806443, -0.4885332825365407, -0.27400362319554383)
+            }
+            dictionary Right = {
+                double3 position = (0, -5, 0)
+                double radius = 5
+            }
+            dictionary Top = {
+                double3 position = (0, 0, 5)
+                double radius = 5
+            }
+            string boundCamera = "/OmniverseKit_Persp"
+        }
+        dictionary omni_layer = {
+            string authoring_layer = "./tron1a_piper.usda"
+            dictionary locked = {
+            }
+            dictionary muteness = {
+            }
+        }
+        dictionary renderSettings = {
+        }
+    }
+    defaultPrim = "wheel_biped"
+    endTimeCode = 0
+    metersPerUnit = 1
+    startTimeCode = -1
+    subLayers = [
+        @../_piper/piper_flattened.usd@
+    ]
+    upAxis = "Z"
+)
+
+def Xform "wheel_biped" (
+    variants = {
+        string Physics = "PhysX"
+        string Sensor = "Sensors"
+    }
+    prepend variantSets = ["Physics", "Sensor"]
+)
+{
+    quatd xformOp:orient = (1, 0, 0, 0)
+    double3 xformOp:scale = (1, 1, 1)
+    double3 xformOp:translate = (0, 0, 0)
+    uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:orient", "xformOp:scale"]
+
+    def Scope "arm_joints"
+    {
+        def PhysicsFixedJoint "joint6_to_gripper_base"
+        {
+            rel physics:body0 = </wheel_biped/arm_link6>
+            rel physics:body1 = </wheel_biped/gripper_base>
+            float physics:breakForce = 3.4028235e38
+            float physics:breakTorque = 3.4028235e38
+            float physics:JointEquivalentInertia = 0.002534026
+            point3f physics:localPos0 = (5.551115e-17, 5.293956e-23, 0)
+            point3f physics:localPos1 = (5.551115e-17, 5.293956e-23, 0)
+            quatf physics:localRot0 = (1, 1.5531762e-15, -1.7125059e-8, 2.7375124e-13)
+            quatf physics:localRot1 = (1, 1.5531762e-15, -1.7125059e-8, 2.7375124e-13)
+        }
+
+        def PhysicsRevoluteJoint "arm_joint1" (
+            apiSchemas = ["PhysicsJointStateAPI:angular", "PhysxJointAPI", "PhysicsDriveAPI:angular"]
+        )
+        {
+            float drive:angular:physics:damping = 0.017453292
+            float drive:angular:physics:maxForce = 100
+            float drive:angular:physics:stiffness = 1.7453293
+            float drive:angular:physics:targetPosition = 0
+            uniform token drive:angular:physics:type = "force"
+            uniform token physics:axis = "Z"
+            rel physics:body0 = </wheel_biped/arm_base>
+            rel physics:body1 = </wheel_biped/arm_link1>
+            float physics:breakForce = 3.4028235e38
+            float physics:breakTorque = 3.4028235e38
+            float physics:JointEquivalentInertia = 0.012992468
+            point3f physics:localPos0 = (0, 0, 0.123)
+            point3f physics:localPos1 = (0, 0, 0)
+            quatf physics:localRot0 = (1, 0, 0, 0)
+            quatf physics:localRot1 = (1, 0, 0, 0)
+            float physics:lowerLimit = -150.00035
+            float physics:upperLimit = 124.21724
+            float physxJoint:maxJointVelocity = 286.47888
+            float state:angular:physics:position = 0
+            float state:angular:physics:velocity = 0
+        }
+
+        def PhysicsRevoluteJoint "arm_joint2" (
+            apiSchemas = ["PhysicsJointStateAPI:angular", "PhysxJointAPI", "PhysicsDriveAPI:angular"]
+        )
+        {
+            float drive:angular:physics:damping = 0.017453292
+            float drive:angular:physics:maxForce = 100
+            float drive:angular:physics:stiffness = 1.7453293
+            float drive:angular:physics:targetPosition = 0
+            uniform token drive:angular:physics:type = "force"
+            uniform token physics:axis = "Z"
+            rel physics:body0 = </wheel_biped/arm_link1>
+            rel physics:body1 = </wheel_biped/arm_link2>
+            float physics:breakForce = 3.4028235e38
+            float physics:breakTorque = 3.4028235e38
+            float physics:JointEquivalentInertia = 0.025270479
+            point3f physics:localPos0 = (-3.5737874e-28, -5.293956e-23, 0)
+            point3f physics:localPos1 = (0, 0, -5.293956e-23)
+            quatf physics:localRot0 = (-0.048008468, 0.048013408, 0.7054761, 0.7054739)
+            quatf physics:localRot1 = (1, -3.8241532e-10, -5.6189497e-9, -5.618932e-9)
+            float physics:lowerLimit = 0
+            float physics:upperLimit = 179.90874
+            float physxJoint:maxJointVelocity = 286.47888
+            float state:angular:physics:position = 0
+            float state:angular:physics:velocity = 0
+        }
+
+        def PhysicsRevoluteJoint "arm_joint3" (
+            apiSchemas = ["PhysicsJointStateAPI:angular", "PhysxJointAPI", "PhysicsDriveAPI:angular"]
+        )
+        {
+            float drive:angular:physics:damping = 0.017453292
+            float drive:angular:physics:maxForce = 100
+            float drive:angular:physics:stiffness = 1.7453293
+            float drive:angular:physics:targetPosition = 0
+            uniform token drive:angular:physics:type = "force"
+            uniform token physics:axis = "Z"
+            rel physics:body0 = </wheel_biped/arm_link2>
+            rel physics:body1 = </wheel_biped/arm_link3>
+            float physics:breakForce = 3.4028235e38
+            float physics:breakTorque = 3.4028235e38
+            float physics:JointEquivalentInertia = 0.049597763
+            point3f physics:localPos0 = (0.28502998, 5.286098e-9, 3.1617692e-10)
+            point3f physics:localPos1 = (2.7755576e-17, 5.551115e-17, 2.1175824e-22)
+            quatf physics:localRot0 = (-0.62399614, 9.553454e-9, -3.4162383e-8, 0.78142744)
+            quatf physics:localRot1 = (1, -1.3053476e-8, 1.1962242e-8, -1.9110873e-8)
+            float physics:lowerLimit = -169.99657
+            float physics:upperLimit = 0
+            float physxJoint:maxJointVelocity = 286.47888
+            float state:angular:physics:position = 0
+            float state:angular:physics:velocity = 0
+        }
+
+        def PhysicsRevoluteJoint "arm_joint4" (
+            apiSchemas = ["PhysicsJointStateAPI:angular", "PhysxJointAPI", "PhysicsDriveAPI:angular"]
+        )
+        {
+            float drive:angular:physics:damping = 0.017453292
+            float drive:angular:physics:maxForce = 100
+            float drive:angular:physics:stiffness = 1.7453293
+            float drive:angular:physics:targetPosition = 0
+            uniform token drive:angular:physics:type = "force"
+            uniform token physics:axis = "Z"
+            rel physics:body0 = </wheel_biped/arm_link3>
+            rel physics:body1 = </wheel_biped/arm_link4>
+            float physics:breakForce = 3.4028235e38
+            float physics:breakTorque = 3.4028235e38
+            float physics:JointEquivalentInertia = 0.14631835
+            point3f physics:localPos0 = (-0.021983974, -0.25075004, -5.829247e-9)
+            point3f physics:localPos1 = (6.488971e-10, 1.965388e-14, 7.4222695e-9)
+            quatf physics:localRot0 = (0.7071055, 0.707108, -7.8684415e-8, -6.6456515e-8)
+            quatf physics:localRot1 = (1, -8.221418e-8, -2.4795332e-8, 4.8904094e-13)
+            float physics:lowerLimit = -99.98113
+            float physics:upperLimit = 99.98113
+            float physxJoint:maxJointVelocity = 286.47888
+            float state:angular:physics:position = 0
+            float state:angular:physics:velocity = 0
+        }
+
+        def PhysicsRevoluteJoint "arm_joint5" (
+            apiSchemas = ["PhysicsJointStateAPI:angular", "PhysxJointAPI", "PhysicsDriveAPI:angular"]
+        )
+        {
+            float drive:angular:physics:damping = 0.017453292
+            float drive:angular:physics:maxForce = 100
+            float drive:angular:physics:stiffness = 1.7453293
+            float drive:angular:physics:targetPosition = 0
+            uniform token drive:angular:physics:type = "force"
+            uniform token physics:axis = "Z"
+            rel physics:body0 = </wheel_biped/arm_link4>
+            rel physics:body1 = </wheel_biped/arm_link5>
+            float physics:breakForce = 3.4028235e38
+            float physics:breakTorque = 3.4028235e38
+            float physics:JointEquivalentInertia = 0.016076963
+            point3f physics:localPos0 = (0, 0, -3.469447e-18)
+            point3f physics:localPos1 = (0, 0, 0)
+            quatf physics:localRot0 = (-0.7071055, 0.707108, -5.71443e-9, -2.6952451e-8)
+            quatf physics:localRot1 = (1, 7.8776445e-8, 1.3561706e-8, 3.1692604e-9)
+            float physics:lowerLimit = -69.90085
+            float physics:upperLimit = 69.90085
+            float physxJoint:maxJointVelocity = 286.47888
+            float state:angular:physics:position = 0
+            float state:angular:physics:velocity = 0
+        }
+
+        def PhysicsRevoluteJoint "arm_joint6" (
+            apiSchemas = ["PhysicsJointStateAPI:angular", "PhysxJointAPI", "PhysicsDriveAPI:angular"]
+        )
+        {
+            float drive:angular:physics:damping = 0.017453292
+            float drive:angular:physics:maxForce = 100
+            float drive:angular:physics:stiffness = 1.7453293
+            float drive:angular:physics:targetPosition = 0
+            uniform token drive:angular:physics:type = "force"
+            uniform token physics:axis = "Z"
+            rel physics:body0 = </wheel_biped/arm_link5>
+            rel physics:body1 = </wheel_biped/arm_link6>
+            float physics:breakForce = 3.4028235e38
+            float physics:breakTorque = 3.4028235e38
+            float physics:JointEquivalentInertia = 0.012935088
+            point3f physics:localPos0 = (0.00008826461, -0.09100002, -9.369875e-9)
+            point3f physics:localPos1 = (5.551115e-17, 5.293956e-23, 0)
+            quatf physics:localRot0 = (0.7071055, 0.707108, -5.8431354e-8, -1.0511883e-7)
+            quatf physics:localRot1 = (1, -6.794499e-8, -1.7125535e-8, 1.9586524e-13)
+            float physics:lowerLimit = -120.00027
+            float physics:upperLimit = 120.00027
+            float physxJoint:maxJointVelocity = 171.88733
+            float state:angular:physics:position = 0
+            float state:angular:physics:velocity = 0
+        }
+
+        def PhysicsPrismaticJoint "arm_joint7" (
+            apiSchemas = ["PhysicsJointStateAPI:linear", "PhysxJointAPI", "PhysicsDriveAPI:linear"]
+        )
+        {
+            float drive:linear:physics:damping = 1
+            float drive:linear:physics:maxForce = 10
+            float drive:linear:physics:stiffness = 100
+            float drive:linear:physics:targetPosition = 0
+            uniform token drive:linear:physics:type = "force"
+            uniform token physics:axis = "Z"
+            rel physics:body0 = </wheel_biped/gripper_base>
+            rel physics:body1 = </wheel_biped/arm_link7>
+            float physics:breakForce = 3.4028235e38
+            float physics:breakTorque = 3.4028235e38
+            float physics:JointEquivalentInertia = 0.0003369934
+            point3f physics:localPos0 = (1.1354825e-9, 1.6495035e-15, 0.1358)
+            point3f physics:localPos1 = (-2.5955902e-9, -2.9689078e-8, -4.475317e-14)
+            quatf physics:localRot0 = (0.7071056, 0.707108, -5.236231e-9, -9.86892e-8)
+            quatf physics:localRot1 = (1, 6.5148754e-8, 5.97004e-8, 6.459123e-8)
+            float physics:lowerLimit = 0
+            float physics:upperLimit = 0.035
+            float physxJoint:maxJointVelocity = 1
+            float state:linear:physics:position = 0
+            float state:linear:physics:velocity = 0
+        }
+
+        def PhysicsPrismaticJoint "arm_joint8" (
+            apiSchemas = ["PhysicsJointStateAPI:linear", "PhysxJointAPI", "PhysicsDriveAPI:linear"]
+        )
+        {
+            float drive:linear:physics:damping = 1
+            float drive:linear:physics:maxForce = 10
+            float drive:linear:physics:stiffness = 100
+            float drive:linear:physics:targetPosition = 0
+            uniform token drive:linear:physics:type = "force"
+            uniform token physics:axis = "Z"
+            rel physics:body0 = </wheel_biped/gripper_base>
+            rel physics:body1 = </wheel_biped/arm_link8>
+            float physics:breakForce = 3.4028235e38
+            float physics:breakTorque = 3.4028235e38
+            float physics:JointEquivalentInertia = 0.00034046717
+            point3f physics:localPos0 = (1.1354825e-9, 1.6495035e-15, 0.1358)
+            point3f physics:localPos1 = (2.5955846e-9, -2.9689078e-8, 2.3900201e-13)
+            quatf physics:localRot0 = (0.7071081, 0.7071055, -0.000002551439, -0.0000025624704)
+            quatf physics:localRot1 = (7.637651e-8, 1.437183e-7, 1, -6.4439676e-9)
+            float physics:lowerLimit = -0.035
+            float physics:upperLimit = 0
+            float physxJoint:maxJointVelocity = 1
+            float state:linear:physics:position = 0
+            float state:linear:physics:velocity = 0
+        }
+    }
+
+    def Xform "gripper_base" (
+        apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"]
+    )
+    {
+        point3f physics:centerOfMass = (-0.00018380716, 0.00008050331, 0.032143667)
+        float3 physics:diagonalInertia = (0.00092944235, 0.00071446947, 0.0003943182)
+        float physics:mass = 0.45
+        quatf physics:principalAxes = (0.9999759, 0.0000908445, 0.006896408, 0.00078851206)
+        quatd xformOp:orient = (0.7372562885284423, 0.0000022649759427244123, 0.6756131770445628, -0.000004887579665807389)
+        double3 xformOp:scale = (1, 1, 1)
+        double3 xformOp:translate = (0.06614253133535385, -5.960464477539063e-8, 0.2231931334733963)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:orient", "xformOp:scale"]
+
+        def Xform "visuals" (
+            instanceable = false
+            add references = </Flattened_Prototype_16>
+        )
+        {
+        }
+
+        def Xform "collisions" (
+            apiSchemas = ["PhysicsCollisionAPI", "PhysicsMeshCollisionAPI", "PhysxMeshMergeCollisionAPI"]
+            instanceable = false
+            add references = </Flattened_Prototype_21>
+        )
+        {
+            rel collection:collisionmeshes:includes = </wheel_biped/gripper_base/collisions>
+            uniform token physics:approximation = "convexHull"
+        }
+    }
+
+    def Xform "arm_base" (
+        apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"]
+    )
+    {
+        point3f physics:centerOfMass = (-0.004736412, 0.000025682913, 0.041451517)
+        float3 physics:diagonalInertia = (0.0026911718, 0.0028261244, 0.00087939383)
+        float physics:mass = 1.02
+        quatf physics:principalAxes = (0.99883044, 0.00022092495, 0.048269138, 0.0028276476)
+        quatd xformOp:orient = (1, 0, 0, 0)
+        double3 xformOp:scale = (1, 1, 1)
+        double3 xformOp:translate = (0.01, 0, 0.01)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:orient", "xformOp:scale"]
+
+        def Xform "visuals" (
+            instanceable = false
+            add references = </Flattened_Prototype_8>
+        )
+        {
+        }
+
+        def Xform "collisions" (
+            apiSchemas = ["PhysicsCollisionAPI", "PhysicsMeshCollisionAPI", "PhysxMeshMergeCollisionAPI"]
+            instanceable = false
+            add references = </Flattened_Prototype_9>
+        )
+        {
+            rel collection:collisionmeshes:includes = </wheel_biped/arm_base/collisions>
+            uniform token physics:approximation = "convexHull"
+        }
+
+        def PhysicsFixedJoint "FixedJoint"
+        {
+            rel physics:body0 = </wheel_biped/base_Link>
+            rel physics:body1 = </wheel_biped/arm_base>
+            float physics:breakForce = 3.4028235e38
+            float physics:breakTorque = 3.4028235e38
+            point3f physics:localPos0 = (0.01, 0, 0.01)
+            point3f physics:localPos1 = (0, 0, 0)
+            quatf physics:localRot0 = (1, 0, 0, 0)
+            quatf physics:localRot1 = (1, 0, 0, 0)
+        }
+    }
+
+    def Xform "arm_link1" (
+        apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"]
+    )
+    {
+        point3f physics:centerOfMass = (0.00012150473, 0.00010463216, -0.0043859733)
+        float3 physics:diagonalInertia = (0.0004892622, 0.0004045508, 0.0004398869)
+        float physics:mass = 0.71
+        quatf physics:principalAxes = (0.99914896, 0.034498405, 0.02249824, -0.002259325)
+        quatd xformOp:orient = (1, 0, 0, 0)
+        double3 xformOp:scale = (1, 1, 1)
+        double3 xformOp:translate = (0.01, 0, 0.13300000339746476)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:orient", "xformOp:scale"]
+
+        def Xform "visuals" (
+            instanceable = false
+            add references = </Flattened_Prototype_17>
+        )
+        {
+        }
+
+        def Xform "collisions" (
+            apiSchemas = ["PhysicsCollisionAPI", "PhysicsMeshCollisionAPI", "PhysxMeshMergeCollisionAPI"]
+            instanceable = false
+            add references = </Flattened_Prototype_11>
+        )
+        {
+            rel collection:collisionmeshes:includes = </wheel_biped/arm_link1/collisions>
+            uniform token physics:approximation = "convexHull"
+            bool physics:collisionEnabled = 0
+        }
+    }
+
+    def Xform "arm_link2" (
+        apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"]
+    )
+    {
+        point3f physics:centerOfMass = (0.19866614, -0.010926924, 0.0014212171)
+        float3 physics:diagonalInertia = (0.0011196613, 0.06790323, 0.06774502)
+        float physics:mass = 1.17
+        quatf physics:principalAxes = (0.99926096, -0.03594562, 0.001399678, 0.013544305)
+        quatd xformOp:orient = (-0.04800847172737131, 0.04801340631580548, 0.7054760843308591, 0.7054738789590684)
+        double3 xformOp:scale = (1, 1, 1)
+        double3 xformOp:translate = (0.01, 0, 0.13300000339746476)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:orient", "xformOp:scale"]
+
+        def Xform "visuals" (
+            instanceable = false
+            add references = </Flattened_Prototype_6>
+        )
+        {
+            token visibility = "inherited"
+        }
+
+        def Xform "collisions" (
+            apiSchemas = ["PhysicsCollisionAPI", "PhysicsMeshCollisionAPI", "PhysxMeshMergeCollisionAPI"]
+            instanceable = false
+            add references = </Flattened_Prototype_13>
+        )
+        {
+            rel collection:collisionmeshes:includes = </wheel_biped/arm_link2/collisions>
+            uniform token physics:approximation = "convexHull"
+            bool physics:collisionEnabled = 0
+        }
+    }
+
+    def Xform "arm_link3" (
+        apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"]
+    )
+    {
+        point3f physics:centerOfMass = (-0.020273766, -0.13391499, -0.00045868265)
+        float3 physics:diagonalInertia = (0.01382268, 0.0002446853, 0.013803205)
+        float physics:mass = 0.5
+        quatf physics:principalAxes = (0.9980055, -0.0008276269, 0.013633699, 0.061631616)
+        quatd xformOp:orient = (0.521319508552551, -0.5213181749708186, 0.4777333532251026, 0.4777281378189075)
+        double3 xformOp:scale = (1, 1, 1)
+        double3 xformOp:translate = (-0.2724019491672516, 0.000002045184373855591, 0.17161645948886872)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:orient", "xformOp:scale"]
+
+        def Xform "visuals" (
+            instanceable = false
+            add references = </Flattened_Prototype_1>
+        )
+        {
+        }
+
+        def Xform "collisions" (
+            apiSchemas = ["PhysicsCollisionAPI", "PhysicsMeshCollisionAPI", "PhysxMeshMergeCollisionAPI"]
+            instanceable = false
+            add references = </Flattened_Prototype_4>
+        )
+        {
+            rel collection:collisionmeshes:includes = </wheel_biped/arm_link3/collisions>
+            uniform token physics:approximation = "convexHull"
+            bool physics:collisionEnabled = 0
+        }
+    }
+
+    def Xform "arm_link4" (
+        apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"]
+    )
+    {
+        point3f physics:centerOfMass = (-0.00009666358, 0.00087606447, -0.004968809)
+        float3 physics:diagonalInertia = (0.00018505153, 0.0001915856, 0.00015286288)
+        float physics:mass = 0.38
+        quatf physics:principalAxes = (0.9933104, -0.11198489, -0.022150887, -0.017412718)
+        quatd xformOp:orient = (0.7372562289237977, 0.000002264976160759154, 0.6756132420875439, -0.00000488758013637501)
+        double3 xformOp:scale = (1, 1, 1)
+        double3 xformOp:translate = (-0.024519389271736143, 5.327165126800537e-7, 0.21535555481910706)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:orient", "xformOp:scale"]
+
+        def Xform "visuals" (
+            instanceable = false
+            add references = </Flattened_Prototype_10>
+        )
+        {
+        }
+
+        def Xform "collisions" (
+            apiSchemas = ["PhysicsCollisionAPI", "PhysicsMeshCollisionAPI", "PhysxMeshMergeCollisionAPI"]
+            instanceable = false
+            add references = </Flattened_Prototype_2>
+        )
+        {
+            rel collection:collisionmeshes:includes = </wheel_biped/arm_link4/collisions>
+            uniform token physics:approximation = "convexHull"
+        }
+    }
+
+    def Xform "arm_link5" (
+        apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"]
+    )
+    {
+        point3f physics:centerOfMass = (-0.000041055413, -0.056648668, -0.0037205792)
+        float3 physics:diagonalInertia = (0.0016616902, 0.00018502779, 0.0016432819)
+        float physics:mass = 0.383
+        quatf physics:principalAxes = (0.999992, -0.0035180463, 0.0018899053, 0.000013833689)
+        quatd xformOp:orient = (0.5213195681571962, -0.5213181798945121, 0.4777333031157614, 0.4777281175124319)
+        double3 xformOp:scale = (1, 1, 1)
+        double3 xformOp:translate = (-0.024519389271736143, 5.327165126800537e-7, 0.21535555481910706)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:orient", "xformOp:scale"]
+
+        def Xform "visuals" (
+            instanceable = false
+            add references = </Flattened_Prototype_5>
+        )
+        {
+        }
+
+        def Xform "collisions" (
+            apiSchemas = ["PhysicsCollisionAPI", "PhysicsMeshCollisionAPI", "PhysxMeshMergeCollisionAPI"]
+            instanceable = false
+            add references = </Flattened_Prototype_18>
+        )
+        {
+            rel collection:collisionmeshes:includes = </wheel_biped/arm_link5/collisions>
+            uniform token physics:approximation = "convexHull"
+        }
+    }
+
+    def Xform "arm_link6" (
+        apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"]
+    )
+    {
+        point3f physics:centerOfMass = (-0.000088259076, 0.000009059838, -0.002)
+        float3 physics:diagonalInertia = (5.7301554e-7, 5.7301554e-7, 0.0000010673887)
+        float physics:mass = 0.006990896
+        quatf physics:principalAxes = (0.92387956, 0, 0, 0.38268343)
+        quatd xformOp:orient = (0.7372562885284423, 0.0000022649759427244123, 0.6756131770445628, -0.000004887579665807389)
+        double3 xformOp:scale = (1, 1, 1)
+        double3 xformOp:translate = (0.06614253133535385, -5.960464477539063e-8, 0.2231931334733963)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:orient", "xformOp:scale"]
+
+        def Xform "visuals" (
+            instanceable = false
+            add references = </Flattened_Prototype_12>
+        )
+        {
+        }
+
+        def Xform "collisions" (
+            apiSchemas = ["PhysicsCollisionAPI", "PhysicsMeshCollisionAPI", "PhysxMeshMergeCollisionAPI"]
+            instanceable = false
+            add references = </Flattened_Prototype_7>
+        )
+        {
+            rel collection:collisionmeshes:includes = </wheel_biped/arm_link6/collisions>
+            uniform token physics:approximation = "convexHull"
+        }
+    }
+
+    def Xform "arm_link7" (
+        apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"]
+    )
+    {
+        point3f physics:centerOfMass = (0.00065123185, -0.049192987, 0.009722588)
+        float3 physics:diagonalInertia = (0.00007367825, 0.0000050885983, 0.00007745315)
+        float physics:mass = 0.025
+        quatf physics:principalAxes = (0.993599, 0.09740352, 0.057173274, -0.0022268668)
+        quatd xformOp:orient = (0.5213164091110226, 0.5213213762879505, 0.4777263685822969, -0.4777350112541444)
+        double3 xformOp:scale = (1, 1, 1)
+        double3 xformOp:translate = (0.20142654538154603, -0.000001409995206813619, 0.23502045333385468)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:orient", "xformOp:scale"]
+
+        def Xform "visuals" (
+            instanceable = false
+            add references = </Flattened_Prototype_3>
+        )
+        {
+        }
+
+        def Xform "collisions" (
+            apiSchemas = ["PhysicsCollisionAPI", "PhysicsMeshCollisionAPI", "PhysxMeshMergeCollisionAPI"]
+            instanceable = false
+            add references = </Flattened_Prototype_14>
+        )
+        {
+            rel collection:collisionmeshes:includes = </wheel_biped/arm_link7/collisions>
+            uniform token physics:approximation = "convexHull"
+        }
+    }
+
+    def Xform "arm_link8" (
+        apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"]
+    )
+    {
+        point3f physics:centerOfMass = (0.00065123185, -0.049192987, 0.009722588)
+        float3 physics:diagonalInertia = (0.00007367825, 0.0000050885983, 0.00007745315)
+        float physics:mass = 0.025
+        quatf physics:principalAxes = (0.993599, 0.09740352, 0.057173274, -0.0022268668)
+        quatd xformOp:orient = (-0.4777263104915619, 0.47773516539861605, 0.5213198917732863, 0.5213178056110936)
+        double3 xformOp:scale = (1, 1, 1)
+        double3 xformOp:translate = (0.20142654538154603, -0.000001409995206813619, 0.23502045333385468)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:orient", "xformOp:scale"]
+
+        def Xform "visuals" (
+            instanceable = false
+            add references = </Flattened_Prototype_15>
+        )
+        {
+        }
+
+        def Xform "collisions" (
+            apiSchemas = ["PhysicsCollisionAPI", "PhysicsMeshCollisionAPI", "PhysxMeshMergeCollisionAPI"]
+            instanceable = false
+            add references = </Flattened_Prototype_19>
+        )
+        {
+            rel collection:collisionmeshes:includes = </wheel_biped/arm_link8/collisions>
+            uniform token physics:approximation = "convexHull"
+        }
+    }
+
+    over "base_Link"
+    {
+    }
+
+    over "abad_L_Link"
+    {
+    }
+
+    over "hip_L_Link"
+    {
+    }
+
+    over "knee_L_Link"
+    {
+    }
+
+    over "wheel_L_Link"
+    {
+    }
+
+    over "abad_R_Link"
+    {
+    }
+
+    over "hip_R_Link"
+    {
+    }
+
+    over "knee_R_Link"
+    {
+    }
+
+    over "wheel_R_Link"
+    {
+    }
+
+    over "limx_imu"
+    {
+    }
+
+    over "joints"
+    {
+        over "abad_L_Joint"
+        {
+            float state:angular:physics:position = 0
+            float state:angular:physics:velocity = 0
+        }
+
+        over "abad_R_Joint"
+        {
+            float state:angular:physics:position = 0
+            float state:angular:physics:velocity = 0
+        }
+
+        over "hip_L_Joint"
+        {
+            float state:angular:physics:position = 0
+            float state:angular:physics:velocity = 0
+        }
+
+        over "hip_R_Joint"
+        {
+            float state:angular:physics:position = 0
+            float state:angular:physics:velocity = 0
+        }
+
+        over "knee_L_Joint"
+        {
+            float state:angular:physics:position = 0
+            float state:angular:physics:velocity = 0
+        }
+
+        over "knee_R_Joint"
+        {
+            float state:angular:physics:position = 0
+            float state:angular:physics:velocity = 0
+        }
+
+        over "wheel_L_Joint"
+        {
+            float state:angular:physics:position = 0
+            float state:angular:physics:velocity = 0
+        }
+
+        over "wheel_R_Joint"
+        {
+            float state:angular:physics:position = 0
+            float state:angular:physics:velocity = 0
+        }
+    }
+    variantSet "Physics" = {
+        "None" (
+            prepend references = @./configuration/WF_TRON1A_base.usd@
+        ) {
+            over "joints" (
+                active = false
+            )
+            {
+            }
+
+        }
+        "PhysX" (
+            prepend payload = @./configuration/WF_TRON1A_physics.usd@
+        ) {
+
+        }
+    }
+    variantSet "Sensor" = {
+        "None" {
+
+        }
+        "Sensors" (
+            prepend payload = @./configuration/WF_TRON1A_sensor.usd@
+        ) {
+
+        }
+    }
+}
+
+def "Render" (
+    hide_in_stage_window = true
+    no_delete = true
+)
+{
+    def "OmniverseKit"
+    {
+        def "HydraTextures" (
+            hide_in_stage_window = true
+            no_delete = true
+        )
+        {
+            def RenderProduct "omni_kit_widget_viewport_ViewportTexture_0" (
+                prepend apiSchemas = ["OmniRtxSettingsCommonAdvancedAPI_1", "OmniRtxSettingsRtAdvancedAPI_1", "OmniRtxSettingsPtAdvancedAPI_1", "OmniRtxPostColorGradingAPI_1", "OmniRtxPostChromaticAberrationAPI_1", "OmniRtxPostBloomPhysicalAPI_1", "OmniRtxPostMatteObjectAPI_1", "OmniRtxPostCompositingAPI_1", "OmniRtxPostDofAPI_1", "OmniRtxPostMotionBlurAPI_1", "OmniRtxPostTvNoiseAPI_1", "OmniRtxPostTonemapIrayReinhardAPI_1", "OmniRtxPostDebugSettingsAPI_1", "OmniRtxDebugSettingsAPI_1"]
+                hide_in_stage_window = true
+                no_delete = true
+            )
+            {
+                rel camera = </OmniverseKit_Persp>
+                token omni:rtx:background:source:texture:textureMode = "repeatMirrored"
+                token omni:rtx:background:source:type = "domeLight"
+                bool omni:rtx:dlss:frameGeneration = 0
+                bool omni:rtx:material:db:nonVisualMaterialCSV:enabled = 0
+                bool omni:rtx:material:db:syncLoads = 1
+                token omni:rtx:post:dlss:execMode = "performance"
+                bool omni:rtx:post:registeredCompositing:invertColorCorrection = 1
+                bool omni:rtx:post:registeredCompositing:invertToneMap = 1
+                bool omni:rtx:pt:lightcache:cached:dontResolveConflicts = 1
+                int omni:rtx:pt:maxSamplesPerLaunch = 2073600
+                int omni:rtx:pt:mgpu:maxPixelsPerRegionExponent = 12
+                color3f omni:rtx:rt:ambientLight:color = (0.1, 0.1, 0.1)
+                bool omni:rtx:rt:demoire = 0
+                bool omni:rtx:rt:ecoMode:enabled
+                bool omni:rtx:rt:lightcache:spatialCache:dontResolveConflicts = 1
+                bool omni:rtx:scene:hydra:materialSyncLoads = 1
+                bool omni:rtx:scene:hydra:mdlMaterialWarmup = 1
+                uint omni:rtx:viewTile:limit = 4294967295
+                rel orderedVars = </Render/Vars/LdrColor>
+                custom bool overrideClipRange = 0
+                uniform int2 resolution = (1280, 720)
+            }
+        }
+    }
+
+    def RenderSettings "OmniverseGlobalRenderSettings" (
+        prepend apiSchemas = ["OmniRtxSettingsGlobalRtAdvancedAPI_1", "OmniRtxSettingsGlobalPtAdvancedAPI_1"]
+        no_delete = true
+    )
+    {
+        rel products = </Render/OmniverseKit/HydraTextures/omni_kit_widget_viewport_ViewportTexture_0>
+    }
+
+    def "Vars"
+    {
+        def RenderVar "LdrColor" (
+            hide_in_stage_window = true
+            no_delete = true
+        )
+        {
+            uniform string sourceName = "LdrColor"
+        }
+    }
+}
+
+over "piper"
+{
+    over "joints" (
+        active = false
+    )
+    {
+    }
+
+    over "gripper_base" (
+        active = false
+    )
+    {
+    }
+
+    over "arm_base" (
+        active = false
+    )
+    {
+    }
+
+    over "arm_link1" (
+        active = false
+    )
+    {
+    }
+
+    over "arm_link2" (
+        active = false
+    )
+    {
+    }
+
+    over "arm_link3" (
+        active = false
+    )
+    {
+    }
+
+    over "arm_link4" (
+        active = false
+    )
+    {
+    }
+
+    over "arm_link5" (
+        active = false
+    )
+    {
+    }
+
+    over "arm_link6" (
+        active = false
+    )
+    {
+    }
+
+    over "arm_link7" (
+        active = false
+    )
+    {
+    }
+
+    over "arm_link8" (
+        active = false
+    )
+    {
+    }
+}
+
