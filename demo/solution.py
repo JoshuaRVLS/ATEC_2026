@@ -58,6 +58,9 @@ class AlgSolution:
             dtype=torch.float32,
         )
 
+        self.phase = "GO_TO_BOX"
+        self.step = 0 
+
 
     def _resolve_joint_ids(self, candidates: tuple[list[str], ...]) -> list[int]:
         last_error = None
@@ -183,28 +186,93 @@ class AlgSolution:
 
         return action_env
 
-    def predicts(self, obs, current_score):
-        """Run policy inference and return current-env full-body action."""
-        # if current_score > 1:
-        #     return {'action': [], 'giveup': True}
-        proprio = obs["proprio"].to(self.device)
-        action_dim = (int(proprio.shape[-1]) - 12) // 3
+    def _compute_base_action(self, obs, action_dim: int) -> torch.Tensor:
+        """Run the locomotion baseline and map it into the current env action space."""
         policy_obs = self._extract_policy_obs(obs, action_dim)
 
         with torch.inference_mode():
             action_train = self.policy(policy_obs)
 
         if not isinstance(action_train, torch.Tensor):
-            action_train = torch.as_tensor(
-                action_train, device=self.device, dtype=torch.float32
-            )
+            action_train = torch.as_tensor(action_train, device=self.device, dtype=torch.float32)
 
         action_train = action_train.to(device=self.device, dtype=torch.float32)
-
         if action_train.ndim == 1:
             action_train = action_train.unsqueeze(0)
 
-        action_env = self._map_policy_action_to_env_action(action_train, action_dim)
-        action_env = action_env.cpu().numpy().tolist()
-        return {'action': action_env, 'giveup': False}
+        return self._map_policy_action_to_env_action(action_train, action_dim)
 
+    def _set_velocity_command(self, lin_x: float, lin_y: float, ang_z: float) -> None:
+        self.fixed_velocity_commands = torch.tensor(
+            [lin_x, lin_y, ang_z], device=self.device, dtype=torch.float32
+        ).view(1, 3)
+
+    def predicts(self, obs, current_score):
+        """Run policy inference and return current-env full-body action."""
+        # if current_score > 1:
+        #     return {'action': [], 'giveup': True}
+        proprio = obs["proprio"].to(self.device)
+        action_dim = (int(proprio.shape[-1]) - 12) // 3
+
+        if self.phase == "GO_TO_BOX":
+            action = self._go_to_box_action(obs, action_dim)
+            if self.step > 160:
+                self.phase = "PUSH_BOX"
+                self.step = 0 
+        elif self.phase == "PUSH_BOX":
+            action = self._push_box_action(obs, action_dim)
+            if self.step > 220:
+                self.phase = "CROSS"
+                self.step = 0
+        else:
+            action = self._cross_action(obs, action_dim)
+
+        self.step += 1 
+        return {"action": action.cpu().tolist(), "giveup": False}
+    
+    def _go_to_box_action(self, obs, action_dim: int) -> torch.Tensor:
+        """Turn toward the box first, then walk into it."""
+        if self.step < 45:
+            # Yaw left so the robot faces the box parked at +Y.
+            self._set_velocity_command(0.18, 0.0, 0.65)
+        else:
+            # Drive forward once roughly aligned.
+            self._set_velocity_command(0.75, 0.0, 0.0)
+
+        base_action = self._compute_base_action(obs, action_dim)
+        return base_action
+    
+    def _push_box_action(self, obs, action_dim: int) -> torch.Tensor:
+        """Use a stronger forward command to keep pushing the box toward the ditch."""
+        self._set_velocity_command(0.95, 0.0, 0.0)
+        base_action = self._compute_base_action(obs, action_dim)
+        # Slightly amplify the leg action to maintain contact pressure on the box.
+        base_action[:, self.leg_joint_indices] *= 1.08
+        return torch.clamp(base_action, -1.25, 1.25)
+
+    def _cross_action(self, obs, action_dim: int) -> torch.Tensor:
+        """Re-align to the traversal direction and continue toward the goal."""
+        if self.step < 40:
+            # Undo part of the earlier yaw so the robot faces +X again.
+            self._set_velocity_command(0.22, 0.0, -0.55)
+        else:
+            self._set_velocity_command(0.85, 0.0, 0.0)
+
+        return self._compute_base_action(obs, action_dim)
+
+        # with torch.inference_mode():
+        #     action_train = self.policy(policy_obs)
+
+        # if not isinstance(action_train, torch.Tensor):
+        #     action_train = torch.as_tensor(
+        #         action_train, device=self.device, dtype=torch.float32
+        #     )
+
+        # action_train = action_train.to(device=self.device, dtype=torch.float32)
+
+        # if action_train.ndim == 1:
+        #     action_train = action_train.unsqueeze(0)
+
+        # action_env = self._map_policy_action_to_env_action(action_train, action_dim)
+        # action_env = action_env.cpu().numpy().tolist()
+        # return {'action': action_env, 'giveup': False}
