@@ -92,8 +92,10 @@ class BetterTerrainImporter(TerrainImporter):
         Raises:
             ValueError: If a terrain with the same name already exists.
         """
-        # create prim path for the terrain
-        prim_path = self.cfg.prim_path + f"/{name}"
+        # Newer Isaac Lab ground-plane spawners expect the collision prim to live
+        # directly under the configured terrain prim path rather than a nested
+        # child such as "/World/ground/terrain".
+        prim_path = self.cfg.prim_path
         # check if key exists
         if prim_path in self.terrain_prim_paths:
             raise ValueError(
