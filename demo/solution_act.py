@@ -10,9 +10,9 @@ import os
 current_path = os.path.dirname(os.path.abspath(__file__))
 #sys.path.insert(0, current_path)
 
-from act.detr.backbone import build_backbone
-from act.detr.transformer import build_transformer
-from act.detr.detr_vae import build_encoder, DETRVAE
+from demo.act.detr.backbone import build_backbone
+from demo.act.detr.transformer import build_transformer
+from demo.act.detr.detr_vae import build_encoder, DETRVAE
 
 @dataclass
 class Args:
