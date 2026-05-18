@@ -6,7 +6,7 @@ from pathlib import Path
 import torch
 import torchvision.transforms.functional as TF
 
-from solution_act import Agent, Args
+from demo.solution_act import Agent, Args
 
 
 class AlgSolution:
