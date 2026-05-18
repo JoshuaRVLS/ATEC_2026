@@ -10,6 +10,12 @@ from isaaclab.actuators import ImplicitActuatorCfg
 from atec_rl_lab.assets.robots.cfg import ATECArticulationCfg, CameraCfg
 from atec_rl_lab.assets import ATEC_ASSETS_MODEL_DIR
 
+
+def _quat_wxyz_from_euler(seq: str, angles) -> tuple[float, float, float, float]:
+    """Return quaternion in scalar-first order from Euler angles."""
+    quat_xyzw = R.from_euler(seq, angles).as_quat()
+    return tuple(float(x) for x in (quat_xyzw[3], quat_xyzw[0], quat_xyzw[1], quat_xyzw[2]))
+
 """
 This file contains the configuration for the LIMX Tron1A robots.
 """
@@ -82,7 +88,7 @@ TRON1A_WHEEL_CFG = ATECArticulationCfg(
     head_camera_link_name="base_Link",
     head_camera_offset=CameraCfg.OffsetCfg(
         pos=(0.12, 0.0, 0.0),
-        rot=tuple(float(x) for x in R.from_euler("xyz", [0., np.pi/6, 0.]).as_quat(scalar_first=True)),
+        rot=_quat_wxyz_from_euler("xyz", [0.0, np.pi / 6, 0.0]),
         convention="world",
     ),
 )
@@ -105,7 +111,7 @@ TRON1A_PIPER_CFG.actuators["arms"] = ImplicitActuatorCfg(
 TRON1A_PIPER_CFG.ee_camera_link_name = "gripper_base"
 TRON1A_PIPER_CFG.ee_camera_offset = CameraCfg.OffsetCfg(
     pos=(-0.05, 0.0, 0.06),
-    rot=tuple(float(x) for x in R.from_euler("xyz", [0., 0, -np.pi/2]).as_quat(scalar_first=True)),
+    rot=_quat_wxyz_from_euler("xyz", [0.0, 0.0, -np.pi / 2]),
     convention="ros",
 )
 TRON1A_PIPER_CFG.leg_joint_names = [

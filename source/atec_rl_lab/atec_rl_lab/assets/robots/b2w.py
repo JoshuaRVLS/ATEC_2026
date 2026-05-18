@@ -12,6 +12,12 @@ from isaaclab.sensors import CameraCfg
 from atec_rl_lab.assets.robots import UNITREE_B2_CFG
 from atec_rl_lab.assets import ATEC_ASSETS_MODEL_DIR
 
+
+def _quat_wxyz_from_euler(seq: str, angles) -> tuple[float, float, float, float]:
+    """Return quaternion in scalar-first order from Euler angles."""
+    quat_xyzw = R.from_euler(seq, angles).as_quat()
+    return tuple(float(x) for x in (quat_xyzw[3], quat_xyzw[0], quat_xyzw[1], quat_xyzw[2]))
+
 B2W_USD_PATH = os.path.join(ATEC_ASSETS_MODEL_DIR, "robot/b2w/b2w.usd")
 B2W_PIPER_USD_PATH = os.path.join(ATEC_ASSETS_MODEL_DIR, "robot/b2w/b2w_piper.usda")
 
@@ -43,7 +49,7 @@ UNITREE_B2W_PIPER_CFG.actuators["arms"] = ImplicitActuatorCfg(
 UNITREE_B2W_PIPER_CFG.ee_camera_link_name = "gripper_base"
 UNITREE_B2W_PIPER_CFG.ee_camera_offset = CameraCfg.OffsetCfg(
     pos=(-0.05, 0.0, 0.06),
-    rot=tuple(float(x) for x in R.from_euler("xyz", [0., 0, -np.pi/2]).as_quat(scalar_first=True)),
+    rot=_quat_wxyz_from_euler("xyz", [0.0, 0.0, -np.pi / 2]),
     convention="ros",
 )
 UNITREE_B2W_PIPER_CFG.leg_joint_names = [
@@ -68,5 +74,4 @@ UNITREE_B2W_PIPER_CFG.joint_names = [
     'arm_joint1', 'arm_joint2', 'arm_joint3', 'arm_joint4',
     'arm_joint5', 'arm_joint6', 'arm_joint7', 'arm_joint8'
 ]
-
 
