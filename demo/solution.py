@@ -185,8 +185,8 @@ class AlgSolution:
 
     def predicts(self, obs, current_score):
         """Run policy inference and return current-env full-body action."""
-        if current_score > 1:
-            return {'action': [], 'giveup': True}
+        # if current_score > 1:
+        #     return {'action': [], 'giveup': True}
         proprio = obs["proprio"].to(self.device)
         action_dim = (int(proprio.shape[-1]) - 12) // 3
         policy_obs = self._extract_policy_obs(obs, action_dim)
