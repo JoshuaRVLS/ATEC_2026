@@ -76,7 +76,7 @@ class AlgSolution:
         self.SIDE_PUSH_START_X = -1.25
         self.DETACH_BACKUP_DISTANCE = 0.45
         self.detach_start_x = None
-        self.BOX_LEFT_SIDE_Y = 2.25
+        self.BOX_LEFT_SIDE_Y = 2.65
         self.SIDE_FORWARD_TARGET_X = -1.25
         self.RIGHT_PUSH_TARGET_Y = 1.55
         self.stuck_ticks = 0
@@ -454,15 +454,15 @@ class AlgSolution:
     def _move_left_of_box_action(self, obs, action_dim: int) -> torch.Tensor:
         """Move to the +Y side of the box after contact has been released."""
         yaw_cmd = float(max(-0.30, min(0.30, -1.2 * self.est_yaw)))
-        self._set_velocity_command(0.0, 0.65, yaw_cmd)
+        self._set_velocity_command(-0.05, 0.75, yaw_cmd)
         return self._compute_base_action(obs, action_dim)
 
     def _move_forward_beside_box_action(self, obs, action_dim: int) -> torch.Tensor:
         """Move forward while staying on the left side before side-pushing right."""
         y_error = self.BOX_LEFT_SIDE_Y - self.est_y
-        lin_y = float(max(-0.25, min(0.25, 0.8 * y_error)))
+        lin_y = float(max(-0.15, min(0.35, 0.9 * y_error)))
         yaw_cmd = float(max(-0.30, min(0.30, -1.2 * self.est_yaw)))
-        self._set_velocity_command(0.55, lin_y, yaw_cmd)
+        self._set_velocity_command(0.45, lin_y, yaw_cmd)
         return self._compute_base_action(obs, action_dim)
 
     def _push_box_right_action(self, obs, action_dim: int) -> torch.Tensor:
