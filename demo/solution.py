@@ -392,9 +392,7 @@ class AlgSolution:
         elif self.phase == "MOVE_FORWARD_BESIDE_BOX" and self.est_x >= self.SIDE_FORWARD_TARGET_X:
             self.phase = "PUSH_BOX_RIGHT"
             self.step = 0
-        elif self.phase == "PUSH_BOX_RIGHT" and (
-            current_score >= 16.0 or self.est_y <= self.RIGHT_PUSH_TARGET_Y
-        ):
+        elif self.phase == "PUSH_BOX_RIGHT" and self.est_y <= self.RIGHT_PUSH_TARGET_Y:
             self.phase = "CROSS"
             self.step = 0
 
@@ -462,12 +460,12 @@ class AlgSolution:
         y_error = self.BOX_LEFT_SIDE_Y - self.est_y
         lin_y = float(max(-0.15, min(0.35, 0.9 * y_error)))
         yaw_cmd = float(max(-0.30, min(0.30, -1.2 * self.est_yaw)))
-        self._set_velocity_command(0.45, lin_y, yaw_cmd)
+        self._set_velocity_command(0.75, lin_y, yaw_cmd)
         return self._compute_base_action(obs, action_dim)
 
     def _push_box_right_action(self, obs, action_dim: int) -> torch.Tensor:
         """Push from the left side of the box toward -Y."""
-        self._set_velocity_command(0.10, -0.75, 0.0)
+        self._set_velocity_command(0.15, -0.90, 0.0)
         base_action = self._compute_base_action(obs, action_dim)
         return torch.clamp(base_action, -1.0, 1.0)
 
