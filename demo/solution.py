@@ -78,7 +78,7 @@ class AlgSolution:
         self.detach_start_x = None
         self.BOX_LEFT_SIDE_Y = 2.65
         self.SIDE_FORWARD_TARGET_X = -1.25
-        self.RIGHT_PUSH_TARGET_Y = 1.55
+        self.RIGHT_PUSH_TARGET_Y = 1.20
         self.stuck_ticks = 0
         self.prev_est_x = self.est_x
         self.prev_est_y = self.est_y
@@ -439,7 +439,8 @@ class AlgSolution:
     def _push_box_action(self, obs, action_dim: int) -> torch.Tensor:
         """Use a stronger +X command to push the box into the scoring x-range."""
         lin_y = self._depth_corrected_lateral_cmd(obs, base_lin_y=0.0, gain=0.25)
-        self._set_velocity_command(1.00, lin_y, 0.0)
+        yaw_cmd = float(max(-0.30, min(0.30, -1.4 * self.est_yaw)))
+        self._set_velocity_command(1.00, lin_y, yaw_cmd)
         base_action = self._compute_base_action(obs, action_dim)
         return torch.clamp(base_action, -1.0, 1.0)
 
@@ -465,7 +466,8 @@ class AlgSolution:
 
     def _push_box_right_action(self, obs, action_dim: int) -> torch.Tensor:
         """Push from the left side of the box toward -Y."""
-        self._set_velocity_command(0.15, -0.90, 0.0)
+        yaw_cmd = float(max(-0.35, min(0.35, -1.6 * self.est_yaw)))
+        self._set_velocity_command(0.15, -1.00, yaw_cmd)
         base_action = self._compute_base_action(obs, action_dim)
         return torch.clamp(base_action, -1.0, 1.0)
 
