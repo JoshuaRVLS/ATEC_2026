@@ -77,6 +77,7 @@ class AlgSolution:
         self.DETACH_BACKUP_DISTANCE = 0.45
         self.detach_start_x = None
         self.BOX_LEFT_SIDE_Y = 2.25
+        self.SIDE_FORWARD_TARGET_X = -1.25
         self.RIGHT_PUSH_TARGET_Y = 1.55
         self.stuck_ticks = 0
         self.prev_est_x = self.est_x
@@ -382,10 +383,13 @@ class AlgSolution:
             and self.detach_start_x is not None
             and self.est_x <= self.detach_start_x - self.DETACH_BACKUP_DISTANCE
         ):
-            self.phase = "MOVE_TO_BOX_LEFT_SIDE"
+            self.phase = "MOVE_LEFT_OF_BOX"
             self.detach_start_x = None
             self.step = 0
-        elif self.phase == "MOVE_TO_BOX_LEFT_SIDE" and self.est_y >= self.BOX_LEFT_SIDE_Y:
+        elif self.phase == "MOVE_LEFT_OF_BOX" and self.est_y >= self.BOX_LEFT_SIDE_Y:
+            self.phase = "MOVE_FORWARD_BESIDE_BOX"
+            self.step = 0
+        elif self.phase == "MOVE_FORWARD_BESIDE_BOX" and self.est_x >= self.SIDE_FORWARD_TARGET_X:
             self.phase = "PUSH_BOX_RIGHT"
             self.step = 0
         elif self.phase == "PUSH_BOX_RIGHT" and (
@@ -404,8 +408,10 @@ class AlgSolution:
             action = self._push_box_action(obs, action_dim)
         elif self.phase == "DETACH_FROM_BOX":
             action = self._detach_from_box_action(obs, action_dim)
-        elif self.phase == "MOVE_TO_BOX_LEFT_SIDE":
-            action = self._move_to_box_left_side_action(obs, action_dim)
+        elif self.phase == "MOVE_LEFT_OF_BOX":
+            action = self._move_left_of_box_action(obs, action_dim)
+        elif self.phase == "MOVE_FORWARD_BESIDE_BOX":
+            action = self._move_forward_beside_box_action(obs, action_dim)
         elif self.phase == "PUSH_BOX_RIGHT":
             action = self._push_box_right_action(obs, action_dim)
         else:
@@ -440,13 +446,23 @@ class AlgSolution:
         return torch.clamp(base_action, -1.0, 1.0)
 
     def _detach_from_box_action(self, obs, action_dim: int) -> torch.Tensor:
-        """Back away from the box before moving around to its side."""
-        self._set_velocity_command(-0.60, 0.0, 0.0)
+        """Back away from the box while correcting yaw to face straight."""
+        yaw_cmd = float(max(-0.35, min(0.35, -1.5 * self.est_yaw)))
+        self._set_velocity_command(-0.60, 0.0, yaw_cmd)
         return self._compute_base_action(obs, action_dim)
 
-    def _move_to_box_left_side_action(self, obs, action_dim: int) -> torch.Tensor:
-        """Move to the +Y side of the box so the next push can move it right."""
-        self._set_velocity_command(-0.20, 0.65, 0.0)
+    def _move_left_of_box_action(self, obs, action_dim: int) -> torch.Tensor:
+        """Move to the +Y side of the box after contact has been released."""
+        yaw_cmd = float(max(-0.30, min(0.30, -1.2 * self.est_yaw)))
+        self._set_velocity_command(0.0, 0.65, yaw_cmd)
+        return self._compute_base_action(obs, action_dim)
+
+    def _move_forward_beside_box_action(self, obs, action_dim: int) -> torch.Tensor:
+        """Move forward while staying on the left side before side-pushing right."""
+        y_error = self.BOX_LEFT_SIDE_Y - self.est_y
+        lin_y = float(max(-0.25, min(0.25, 0.8 * y_error)))
+        yaw_cmd = float(max(-0.30, min(0.30, -1.2 * self.est_yaw)))
+        self._set_velocity_command(0.55, lin_y, yaw_cmd)
         return self._compute_base_action(obs, action_dim)
 
     def _push_box_right_action(self, obs, action_dim: int) -> torch.Tensor:
