@@ -74,8 +74,13 @@ class AlgSolution:
         self.BOX_LANE_Y = 1.55
         self.CONTACT_TARGET_X = -3.08
         self.SIDE_PUSH_START_X = -1.25
+        self.DETACH_BACKUP_DISTANCE = 0.45
+        self.detach_start_x = None
         self.BOX_LEFT_SIDE_Y = 2.25
         self.RIGHT_PUSH_TARGET_Y = 1.55
+        self.stuck_ticks = 0
+        self.prev_est_x = self.est_x
+        self.prev_est_y = self.est_y
         self.depth_box = None
         self._last_logged_phase = None
 
@@ -255,6 +260,16 @@ class AlgSolution:
         self.est_x += vx_world * self.dt
         self.est_y += vy_world * self.dt
 
+    def _update_stuck_counter(self) -> None:
+        dx = abs(self.est_x - self.prev_est_x)
+        dy = abs(self.est_y - self.prev_est_y)
+        if self.phase == "PUSH_BOX" and dx < 0.002 and dy < 0.002:
+            self.stuck_ticks += 1
+        else:
+            self.stuck_ticks = 0
+        self.prev_est_x = self.est_x
+        self.prev_est_y = self.est_y
+
     def _get_image_tensor(self, obs, *names):
         image_obs = obs.get("image", {}) if isinstance(obs, dict) else {}
         if not isinstance(image_obs, dict):
@@ -345,6 +360,7 @@ class AlgSolution:
         proprio = obs["proprio"].to(self.device)
         action_dim = (int(proprio.shape[-1]) - 12) // 3
         self._update_pose_estimate(proprio)
+        self._update_stuck_counter()
 
         if self.phase == "BACK_UP" and self.est_x <= self.BACK_UP_TARGET_X:
             self.phase = "MOVE_LEFT_TO_BOX_LANE"
@@ -355,8 +371,19 @@ class AlgSolution:
         elif self.phase == "CONTACT_BOX" and self.est_x >= self.CONTACT_TARGET_X:
             self.phase = "PUSH_BOX"
             self.step = 0
-        elif self.phase == "PUSH_BOX" and self.est_x >= self.SIDE_PUSH_START_X:
+        elif self.phase == "PUSH_BOX" and (
+            self.est_x >= self.SIDE_PUSH_START_X or self.stuck_ticks >= 25
+        ):
+            self.phase = "DETACH_FROM_BOX"
+            self.detach_start_x = self.est_x
+            self.step = 0
+        elif (
+            self.phase == "DETACH_FROM_BOX"
+            and self.detach_start_x is not None
+            and self.est_x <= self.detach_start_x - self.DETACH_BACKUP_DISTANCE
+        ):
             self.phase = "MOVE_TO_BOX_LEFT_SIDE"
+            self.detach_start_x = None
             self.step = 0
         elif self.phase == "MOVE_TO_BOX_LEFT_SIDE" and self.est_y >= self.BOX_LEFT_SIDE_Y:
             self.phase = "PUSH_BOX_RIGHT"
@@ -375,6 +402,8 @@ class AlgSolution:
             action = self._contact_box_action(obs, action_dim)
         elif self.phase == "PUSH_BOX":
             action = self._push_box_action(obs, action_dim)
+        elif self.phase == "DETACH_FROM_BOX":
+            action = self._detach_from_box_action(obs, action_dim)
         elif self.phase == "MOVE_TO_BOX_LEFT_SIDE":
             action = self._move_to_box_left_side_action(obs, action_dim)
         elif self.phase == "PUSH_BOX_RIGHT":
@@ -406,18 +435,23 @@ class AlgSolution:
     def _push_box_action(self, obs, action_dim: int) -> torch.Tensor:
         """Use a stronger +X command to push the box into the scoring x-range."""
         lin_y = self._depth_corrected_lateral_cmd(obs, base_lin_y=0.0, gain=0.25)
-        self._set_velocity_command(0.85, lin_y, 0.0)
+        self._set_velocity_command(1.00, lin_y, 0.0)
         base_action = self._compute_base_action(obs, action_dim)
         return torch.clamp(base_action, -1.0, 1.0)
 
+    def _detach_from_box_action(self, obs, action_dim: int) -> torch.Tensor:
+        """Back away from the box before moving around to its side."""
+        self._set_velocity_command(-0.60, 0.0, 0.0)
+        return self._compute_base_action(obs, action_dim)
+
     def _move_to_box_left_side_action(self, obs, action_dim: int) -> torch.Tensor:
         """Move to the +Y side of the box so the next push can move it right."""
-        self._set_velocity_command(-0.10, 0.45, 0.0)
+        self._set_velocity_command(-0.20, 0.65, 0.0)
         return self._compute_base_action(obs, action_dim)
 
     def _push_box_right_action(self, obs, action_dim: int) -> torch.Tensor:
         """Push from the left side of the box toward -Y."""
-        self._set_velocity_command(0.05, -0.55, 0.0)
+        self._set_velocity_command(0.10, -0.75, 0.0)
         base_action = self._compute_base_action(obs, action_dim)
         return torch.clamp(base_action, -1.0, 1.0)
 
