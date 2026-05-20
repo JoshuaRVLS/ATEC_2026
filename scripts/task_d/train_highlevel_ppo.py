@@ -33,6 +33,7 @@ parser.add_argument("--out", type=str, default="demo/high_level_ppo.pt")
 parser.add_argument("--ckpt_dir", type=str, default="logs/task_d_highlevel_ppo")
 parser.add_argument("--seed", type=int, default=42)
 parser.add_argument("--debug", action="store_true", default=False)
+parser.add_argument("--disable_fabric", action="store_true", default=False)
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
 
