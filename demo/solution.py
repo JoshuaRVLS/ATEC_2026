@@ -334,7 +334,7 @@ class AlgSolution:
     
     def _back_up_action(self, obs, action_dim: int) -> torch.Tensor:
         """Create room behind the box before moving sideways into the box lane."""
-        self._set_velocity_command(-0.35, 0.0, 0.0)
+        self._set_velocity_command(-1, 0.0, 0.0)
         return self._compute_base_action(obs, action_dim)
 
     def _move_left_to_box_lane_action(self, obs, action_dim: int) -> torch.Tensor:
