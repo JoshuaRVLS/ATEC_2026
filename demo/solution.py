@@ -58,7 +58,7 @@ class AlgSolution:
             dtype=torch.float32,
         )
 
-        self.phase = "GO_TO_BOX"
+        self.phase = "STRAFE_TO_BOX"
         self.step = 0 
 
 
@@ -214,14 +214,19 @@ class AlgSolution:
         proprio = obs["proprio"].to(self.device)
         action_dim = (int(proprio.shape[-1]) - 12) // 3
 
-        if self.phase == "GO_TO_BOX":
-            action = self._go_to_box_action(obs, action_dim)
-            if self.step > 160:
+        if self.phase == "STRAFE_TO_BOX":
+            action = self._strafe_to_box_action(obs, action_dim)
+            if self.step > 180:
+                self.phase = "SETTLE_BEHIND_BOX"
+                self.step = 0
+        elif self.phase == "SETTLE_BEHIND_BOX":
+            action = self._settle_behind_box_action(obs, action_dim)
+            if self.step > 60:
                 self.phase = "PUSH_BOX"
                 self.step = 0 
         elif self.phase == "PUSH_BOX":
             action = self._push_box_action(obs, action_dim)
-            if self.step > 220:
+            if self.step > 280:
                 self.phase = "CROSS"
                 self.step = 0
         else:
@@ -230,34 +235,25 @@ class AlgSolution:
         self.step += 1 
         return {"action": action.cpu().tolist(), "giveup": False}
     
-    def _go_to_box_action(self, obs, action_dim: int) -> torch.Tensor:
-        """Turn toward the box first, then walk into it."""
-        if self.step < 45:
-            # Yaw left so the robot faces the box parked at +Y.
-            self._set_velocity_command(0.18, 0.0, 0.65)
-        else:
-            # Drive forward once roughly aligned.
-            self._set_velocity_command(0.75, 0.0, 0.0)
+    def _strafe_to_box_action(self, obs, action_dim: int) -> torch.Tensor:
+        """Move laterally toward the fixed box at y=+1.6 while keeping the +X heading."""
+        self._set_velocity_command(0.05, 0.55, 0.0)
+        return self._compute_base_action(obs, action_dim)
 
-        base_action = self._compute_base_action(obs, action_dim)
-        return base_action
+    def _settle_behind_box_action(self, obs, action_dim: int) -> torch.Tensor:
+        """Creep forward so the robot makes contact with the box before pushing."""
+        self._set_velocity_command(0.25, 0.0, 0.0)
+        return self._compute_base_action(obs, action_dim)
     
     def _push_box_action(self, obs, action_dim: int) -> torch.Tensor:
-        """Use a stronger forward command to keep pushing the box toward the ditch."""
-        self._set_velocity_command(0.95, 0.0, 0.0)
+        """Use a stronger +X command to push the box into the scoring x-range."""
+        self._set_velocity_command(0.85, 0.0, 0.0)
         base_action = self._compute_base_action(obs, action_dim)
-        # Slightly amplify the leg action to maintain contact pressure on the box.
-        base_action[:, self.leg_joint_indices] *= 1.08
-        return torch.clamp(base_action, -1.25, 1.25)
+        return torch.clamp(base_action, -1.0, 1.0)
 
     def _cross_action(self, obs, action_dim: int) -> torch.Tensor:
-        """Re-align to the traversal direction and continue toward the goal."""
-        if self.step < 40:
-            # Undo part of the earlier yaw so the robot faces +X again.
-            self._set_velocity_command(0.22, 0.0, -0.55)
-        else:
-            self._set_velocity_command(0.85, 0.0, 0.0)
-
+        """Continue forward after the box interaction attempt."""
+        self._set_velocity_command(0.75, 0.0, 0.0)
         return self._compute_base_action(obs, action_dim)
 
         # with torch.inference_mode():
