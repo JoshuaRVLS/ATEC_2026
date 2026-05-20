@@ -1,4 +1,5 @@
 import os
+import math
 import torch
 
 class AlgSolution:
@@ -65,10 +66,13 @@ class AlgSolution:
         self.phase = "BACK_UP"
         self.step = 0 
 
-        self.BACK_UP_STEPS = 110
-        self.MOVE_LEFT_STEPS = 320
-        self.CONTACT_STEPS = 55
-        self.PUSH_BOX_STEPS = 360
+        self.dt = 0.02
+        self.est_x = -3.0
+        self.est_y = 0.0
+        self.est_yaw = 0.0
+        self.BACK_UP_TARGET_X = -3.55
+        self.BOX_LANE_Y = 1.55
+        self.CONTACT_TARGET_X = -3.08
         self.depth_box = None
         self._last_logged_phase = None
 
@@ -224,9 +228,29 @@ class AlgSolution:
             print(
                 f"[TaskD] phase={self.phase} step={self.step} "
                 f"cmd=({cmd[0]:+.2f}, {cmd[1]:+.2f}, {cmd[2]:+.2f}) "
+                f"pose=({self.est_x:+.2f}, {self.est_y:+.2f}, {self.est_yaw:+.2f}) "
                 f"depth_box={self.depth_box}"
             )
             self._last_logged_phase = self.phase
+
+    def _update_pose_estimate(self, proprio: torch.Tensor) -> None:
+        """Dead-reckon approximate robot XY from proprio velocity feedback."""
+        base_lin_vel = proprio[0, 0:3]
+        base_ang_vel = proprio[0, 3:6]
+
+        vx_body = float(base_lin_vel[0].item())
+        vy_body = float(base_lin_vel[1].item())
+        yaw_rate = float(base_ang_vel[2].item())
+
+        self.est_yaw += yaw_rate * self.dt
+        cos_yaw = math.cos(self.est_yaw)
+        sin_yaw = math.sin(self.est_yaw)
+
+        vx_world = cos_yaw * vx_body - sin_yaw * vy_body
+        vy_world = sin_yaw * vx_body + cos_yaw * vy_body
+
+        self.est_x += vx_world * self.dt
+        self.est_y += vy_world * self.dt
 
     def _get_image_tensor(self, obs, *names):
         image_obs = obs.get("image", {}) if isinstance(obs, dict) else {}
@@ -316,21 +340,18 @@ class AlgSolution:
         #     return {'action': [], 'giveup': True}
         proprio = obs["proprio"].to(self.device)
         action_dim = (int(proprio.shape[-1]) - 12) // 3
+        self._update_pose_estimate(proprio)
 
-        if self.phase == "BACK_UP" and self.step >= self.BACK_UP_STEPS:
+        if self.phase == "BACK_UP" and self.est_x <= self.BACK_UP_TARGET_X:
             self.phase = "MOVE_LEFT_TO_BOX_LANE"
             self.step = 0
-        elif self.phase == "MOVE_LEFT_TO_BOX_LANE" and (
-            self._box_centered_from_depth(obs) or self.step >= self.MOVE_LEFT_STEPS
-        ):
+        elif self.phase == "MOVE_LEFT_TO_BOX_LANE" and self.est_y >= self.BOX_LANE_Y:
             self.phase = "CONTACT_BOX"
             self.step = 0
-        elif self.phase == "CONTACT_BOX" and self.step >= self.CONTACT_STEPS:
+        elif self.phase == "CONTACT_BOX" and self.est_x >= self.CONTACT_TARGET_X:
             self.phase = "PUSH_BOX"
             self.step = 0
-        elif self.phase == "PUSH_BOX" and (
-            current_score >= 16.0 or self.step >= self.PUSH_BOX_STEPS
-        ):
+        elif self.phase == "PUSH_BOX" and current_score >= 16.0:
             self.phase = "CROSS"
             self.step = 0
 
