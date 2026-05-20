@@ -73,6 +73,9 @@ class AlgSolution:
         self.BACK_UP_TARGET_X = -3.55
         self.BOX_LANE_Y = 1.55
         self.CONTACT_TARGET_X = -3.08
+        self.SIDE_PUSH_START_X = -1.25
+        self.BOX_LEFT_SIDE_Y = 2.25
+        self.RIGHT_PUSH_TARGET_Y = 1.55
         self.depth_box = None
         self._last_logged_phase = None
 
@@ -338,6 +341,7 @@ class AlgSolution:
         """Run policy inference and return current-env full-body action."""
         # if current_score > 1:
         #     return {'action': [], 'giveup': True}
+        
         proprio = obs["proprio"].to(self.device)
         action_dim = (int(proprio.shape[-1]) - 12) // 3
         self._update_pose_estimate(proprio)
@@ -351,7 +355,15 @@ class AlgSolution:
         elif self.phase == "CONTACT_BOX" and self.est_x >= self.CONTACT_TARGET_X:
             self.phase = "PUSH_BOX"
             self.step = 0
-        elif self.phase == "PUSH_BOX" and current_score >= 16.0:
+        elif self.phase == "PUSH_BOX" and self.est_x >= self.SIDE_PUSH_START_X:
+            self.phase = "MOVE_TO_BOX_LEFT_SIDE"
+            self.step = 0
+        elif self.phase == "MOVE_TO_BOX_LEFT_SIDE" and self.est_y >= self.BOX_LEFT_SIDE_Y:
+            self.phase = "PUSH_BOX_RIGHT"
+            self.step = 0
+        elif self.phase == "PUSH_BOX_RIGHT" and (
+            current_score >= 16.0 or self.est_y <= self.RIGHT_PUSH_TARGET_Y
+        ):
             self.phase = "CROSS"
             self.step = 0
 
@@ -363,6 +375,10 @@ class AlgSolution:
             action = self._contact_box_action(obs, action_dim)
         elif self.phase == "PUSH_BOX":
             action = self._push_box_action(obs, action_dim)
+        elif self.phase == "MOVE_TO_BOX_LEFT_SIDE":
+            action = self._move_to_box_left_side_action(obs, action_dim)
+        elif self.phase == "PUSH_BOX_RIGHT":
+            action = self._push_box_right_action(obs, action_dim)
         else:
             action = self._cross_action(obs, action_dim)
 
@@ -372,7 +388,7 @@ class AlgSolution:
     
     def _back_up_action(self, obs, action_dim: int) -> torch.Tensor:
         """Create room behind the box before moving sideways into the box lane."""
-        self._set_velocity_command(-0.35, 0.0, 0.0)
+        self._set_velocity_command(-1.0, 0.0, 0.0)
         return self._compute_base_action(obs, action_dim)
 
     def _move_left_to_box_lane_action(self, obs, action_dim: int) -> torch.Tensor:
@@ -391,6 +407,17 @@ class AlgSolution:
         """Use a stronger +X command to push the box into the scoring x-range."""
         lin_y = self._depth_corrected_lateral_cmd(obs, base_lin_y=0.0, gain=0.25)
         self._set_velocity_command(0.85, lin_y, 0.0)
+        base_action = self._compute_base_action(obs, action_dim)
+        return torch.clamp(base_action, -1.0, 1.0)
+
+    def _move_to_box_left_side_action(self, obs, action_dim: int) -> torch.Tensor:
+        """Move to the +Y side of the box so the next push can move it right."""
+        self._set_velocity_command(-0.10, 0.45, 0.0)
+        return self._compute_base_action(obs, action_dim)
+
+    def _push_box_right_action(self, obs, action_dim: int) -> torch.Tensor:
+        """Push from the left side of the box toward -Y."""
+        self._set_velocity_command(0.05, -0.55, 0.0)
         base_action = self._compute_base_action(obs, action_dim)
         return torch.clamp(base_action, -1.0, 1.0)
 
