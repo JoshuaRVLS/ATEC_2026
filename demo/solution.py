@@ -70,6 +70,7 @@ class AlgSolution:
         self.CONTACT_STEPS = 55
         self.PUSH_BOX_STEPS = 360
         self.depth_box = None
+        self._last_logged_phase = None
 
 
     def _resolve_joint_ids(self, candidates: tuple[list[str], ...]) -> list[int]:
@@ -217,6 +218,16 @@ class AlgSolution:
             [lin_x, lin_y, ang_z], device=self.device, dtype=torch.float32
         ).view(1, 3)
 
+    def _log_phase_command(self) -> None:
+        if self.phase != self._last_logged_phase or self.step % 50 == 0:
+            cmd = self.fixed_velocity_commands.detach().cpu().view(-1).tolist()
+            print(
+                f"[TaskD] phase={self.phase} step={self.step} "
+                f"cmd=({cmd[0]:+.2f}, {cmd[1]:+.2f}, {cmd[2]:+.2f}) "
+                f"depth_box={self.depth_box}"
+            )
+            self._last_logged_phase = self.phase
+
     def _get_image_tensor(self, obs, *names):
         image_obs = obs.get("image", {}) if isinstance(obs, dict) else {}
         if not isinstance(image_obs, dict):
@@ -329,6 +340,7 @@ class AlgSolution:
         else:
             action = self._cross_action(obs, action_dim)
 
+        self._log_phase_command()
         self.step += 1 
         return {"action": action.cpu().tolist(), "giveup": False}
     
@@ -340,7 +352,7 @@ class AlgSolution:
     def _move_left_to_box_lane_action(self, obs, action_dim: int) -> torch.Tensor:
         """Move left, then use depth to center the visible box in the head camera."""
         lin_y = self._depth_corrected_lateral_cmd(obs, base_lin_y=0.45, gain=0.45)
-        self._set_velocity_command(0.0, lin_y, 0.0)
+        self._set_velocity_command(-0.18, lin_y, 0.0)
         return self._compute_base_action(obs, action_dim)
 
     def _contact_box_action(self, obs, action_dim: int) -> torch.Tensor:
