@@ -58,8 +58,17 @@ class AlgSolution:
             dtype=torch.float32,
         )
 
-        self.phase = "STRAFE_TO_BOX"
+        # Task D heuristic:
+        # 1. Back up from the box lane.
+        # 2. Move left (+Y) until aligned behind the fixed box.
+        # 3. Move forward (+X) to push the box into the gap/scoring range.
+        self.phase = "BACK_UP"
         self.step = 0 
+
+        self.BACK_UP_STEPS = 110
+        self.MOVE_LEFT_STEPS = 230
+        self.CONTACT_STEPS = 55
+        self.PUSH_BOX_STEPS = 360
 
 
     def _resolve_joint_ids(self, candidates: tuple[list[str], ...]) -> list[int]:
@@ -214,19 +223,24 @@ class AlgSolution:
         proprio = obs["proprio"].to(self.device)
         action_dim = (int(proprio.shape[-1]) - 12) // 3
 
-        if self.phase == "STRAFE_TO_BOX":
-            action = self._strafe_to_box_action(obs, action_dim)
-            if self.step > 180:
-                self.phase = "SETTLE_BEHIND_BOX"
+        if self.phase == "BACK_UP":
+            action = self._back_up_action(obs, action_dim)
+            if self.step >= self.BACK_UP_STEPS:
+                self.phase = "MOVE_LEFT_TO_BOX_LANE"
                 self.step = 0
-        elif self.phase == "SETTLE_BEHIND_BOX":
-            action = self._settle_behind_box_action(obs, action_dim)
-            if self.step > 60:
+        elif self.phase == "MOVE_LEFT_TO_BOX_LANE":
+            action = self._move_left_to_box_lane_action(obs, action_dim)
+            if self.step >= self.MOVE_LEFT_STEPS:
+                self.phase = "CONTACT_BOX"
+                self.step = 0
+        elif self.phase == "CONTACT_BOX":
+            action = self._contact_box_action(obs, action_dim)
+            if self.step >= self.CONTACT_STEPS:
                 self.phase = "PUSH_BOX"
                 self.step = 0 
         elif self.phase == "PUSH_BOX":
             action = self._push_box_action(obs, action_dim)
-            if self.step > 280:
+            if self.step >= self.PUSH_BOX_STEPS:
                 self.phase = "CROSS"
                 self.step = 0
         else:
@@ -235,13 +249,18 @@ class AlgSolution:
         self.step += 1 
         return {"action": action.cpu().tolist(), "giveup": False}
     
-    def _strafe_to_box_action(self, obs, action_dim: int) -> torch.Tensor:
-        """Move laterally toward the fixed box at y=+1.6 while keeping the +X heading."""
-        self._set_velocity_command(0.05, 0.55, 0.0)
+    def _back_up_action(self, obs, action_dim: int) -> torch.Tensor:
+        """Create room behind the box before moving sideways into the box lane."""
+        self._set_velocity_command(-0.35, 0.0, 0.0)
         return self._compute_base_action(obs, action_dim)
 
-    def _settle_behind_box_action(self, obs, action_dim: int) -> torch.Tensor:
-        """Creep forward so the robot makes contact with the box before pushing."""
+    def _move_left_to_box_lane_action(self, obs, action_dim: int) -> torch.Tensor:
+        """Move toward y=+1.6 so the fixed box becomes directly in front of the robot."""
+        self._set_velocity_command(0.0, 0.50, 0.0)
+        return self._compute_base_action(obs, action_dim)
+
+    def _contact_box_action(self, obs, action_dim: int) -> torch.Tensor:
+        """Creep forward to make contact before the strong push phase."""
         self._set_velocity_command(0.25, 0.0, 0.0)
         return self._compute_base_action(obs, action_dim)
     
