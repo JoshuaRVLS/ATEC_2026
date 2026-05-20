@@ -78,7 +78,9 @@ class AlgSolution:
         self.detach_start_x = None
         self.contact_ticks = 0
         self.BOX_LEFT_SIDE_Y = 2.65
-        self.SIDE_FORWARD_TARGET_X = -1.25
+        self.ROTATE_CORNER_X = -1.05
+        self.ROTATE_RIGHT_TARGET_Y = 1.70
+        self.SIDE_FORWARD_TARGET_X = -0.85
         self.RIGHT_PUSH_TARGET_Y = 1.20
         self.stuck_ticks = 0
         self.prev_est_x = self.est_x
@@ -398,7 +400,10 @@ class AlgSolution:
         elif self.phase == "MOVE_LEFT_OF_BOX" and self.est_y >= self.BOX_LEFT_SIDE_Y:
             self.phase = "MOVE_FORWARD_BESIDE_BOX"
             self.step = 0
-        elif self.phase == "MOVE_FORWARD_BESIDE_BOX" and self.est_x >= self.SIDE_FORWARD_TARGET_X:
+        elif self.phase == "MOVE_FORWARD_BESIDE_BOX" and self.est_x >= self.ROTATE_CORNER_X:
+            self.phase = "ROTATE_BOX_RIGHT"
+            self.step = 0
+        elif self.phase == "ROTATE_BOX_RIGHT" and self.est_y <= self.ROTATE_RIGHT_TARGET_Y:
             self.phase = "PUSH_BOX_RIGHT"
             self.step = 0
         elif self.phase == "PUSH_BOX_RIGHT" and self.est_y <= self.RIGHT_PUSH_TARGET_Y:
@@ -419,6 +424,8 @@ class AlgSolution:
             action = self._move_left_of_box_action(obs, action_dim)
         elif self.phase == "MOVE_FORWARD_BESIDE_BOX":
             action = self._move_forward_beside_box_action(obs, action_dim)
+        elif self.phase == "ROTATE_BOX_RIGHT":
+            action = self._rotate_box_right_action(obs, action_dim)
         elif self.phase == "PUSH_BOX_RIGHT":
             action = self._push_box_right_action(obs, action_dim)
         else:
@@ -467,12 +474,19 @@ class AlgSolution:
         return self._compute_base_action(obs, action_dim)
 
     def _move_forward_beside_box_action(self, obs, action_dim: int) -> torch.Tensor:
-        """Move forward while staying on the left side before side-pushing right."""
+        """Move forward on the left side until reaching an off-center rotate point."""
         y_error = self.BOX_LEFT_SIDE_Y - self.est_y
         lin_y = float(max(-0.15, min(0.35, 0.9 * y_error)))
         yaw_cmd = float(max(-0.30, min(0.30, -1.2 * self.est_yaw)))
         self._set_velocity_command(0.75, lin_y, yaw_cmd)
         return self._compute_base_action(obs, action_dim)
+
+    def _rotate_box_right_action(self, obs, action_dim: int) -> torch.Tensor:
+        """Push diagonally on the box corner to create yaw before insertion."""
+        yaw_cmd = float(max(-0.35, min(0.35, -1.6 * self.est_yaw)))
+        self._set_velocity_command(0.45, -0.95, yaw_cmd)
+        base_action = self._compute_base_action(obs, action_dim)
+        return torch.clamp(base_action, -1.0, 1.0)
 
     def _push_box_right_action(self, obs, action_dim: int) -> torch.Tensor:
         """Push from the left side of the box toward -Y."""
