@@ -317,26 +317,31 @@ class AlgSolution:
         proprio = obs["proprio"].to(self.device)
         action_dim = (int(proprio.shape[-1]) - 12) // 3
 
+        if self.phase == "BACK_UP" and self.step >= self.BACK_UP_STEPS:
+            self.phase = "MOVE_LEFT_TO_BOX_LANE"
+            self.step = 0
+        elif self.phase == "MOVE_LEFT_TO_BOX_LANE" and (
+            self._box_centered_from_depth(obs) or self.step >= self.MOVE_LEFT_STEPS
+        ):
+            self.phase = "CONTACT_BOX"
+            self.step = 0
+        elif self.phase == "CONTACT_BOX" and self.step >= self.CONTACT_STEPS:
+            self.phase = "PUSH_BOX"
+            self.step = 0
+        elif self.phase == "PUSH_BOX" and (
+            current_score >= 16.0 or self.step >= self.PUSH_BOX_STEPS
+        ):
+            self.phase = "CROSS"
+            self.step = 0
+
         if self.phase == "BACK_UP":
             action = self._back_up_action(obs, action_dim)
-            if self.step >= self.BACK_UP_STEPS:
-                self.phase = "MOVE_LEFT_TO_BOX_LANE"
-                self.step = 0
         elif self.phase == "MOVE_LEFT_TO_BOX_LANE":
             action = self._move_left_to_box_lane_action(obs, action_dim)
-            if self._box_centered_from_depth(obs) or self.step >= self.MOVE_LEFT_STEPS:
-                self.phase = "CONTACT_BOX"
-                self.step = 0
         elif self.phase == "CONTACT_BOX":
             action = self._contact_box_action(obs, action_dim)
-            if self.step >= self.CONTACT_STEPS:
-                self.phase = "PUSH_BOX"
-                self.step = 0 
         elif self.phase == "PUSH_BOX":
             action = self._push_box_action(obs, action_dim)
-            if current_score >= 16.0 or self.step >= self.PUSH_BOX_STEPS:
-                self.phase = "CROSS"
-                self.step = 0
         else:
             action = self._cross_action(obs, action_dim)
 
@@ -346,7 +351,7 @@ class AlgSolution:
     
     def _back_up_action(self, obs, action_dim: int) -> torch.Tensor:
         """Create room behind the box before moving sideways into the box lane."""
-        self._set_velocity_command(-1, 0.0, 0.0)
+        self._set_velocity_command(-0.35, 0.0, 0.0)
         return self._compute_base_action(obs, action_dim)
 
     def _move_left_to_box_lane_action(self, obs, action_dim: int) -> torch.Tensor:
