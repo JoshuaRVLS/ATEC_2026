@@ -213,7 +213,7 @@ class AlgSolution:
 
     def _set_velocity_command(self, lin_x: float, lin_y: float, ang_z: float) -> None:
         self.fixed_velocity_commands = torch.tensor(
-            [lin_x, lin_y, ang_z], d\vice=self.device, dtype=torch.float32
+            [lin_x, lin_y, ang_z], device=self.device, dtype=torch.float32
         ).view(1, 3)
 
     def predicts(self, obs, current_score):
