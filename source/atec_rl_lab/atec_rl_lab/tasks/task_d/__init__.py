@@ -1,7 +1,7 @@
 import gymnasium as gym
 
 from .terrain import TASK_D_TERRAIN_CFG
-from .env_cfg import TaskDEnvCfg, TaskDEnvB2Cfg
+from .env_cfg import TaskDEnvCfg, TaskDEnvB2Cfg, TaskDFlatTrainEnvB2Cfg
 
 
 gym.register(
@@ -32,6 +32,15 @@ gym.register(
 )
 
 gym.register(
+    id = "ATEC-TaskD-FlatTrain-B2Piper",
+    entry_point="atec_rl_lab.tasks.task_base.envs_base:BaseRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.env_cfg:TaskDFlatTrainEnvB2Cfg"
+    },
+)
+
+gym.register(
     id = "ATEC-TaskD-B2wPiper",
     entry_point="atec_rl_lab.tasks.task_base.envs_base:BaseRLEnv",
     disable_env_checker=True,
@@ -40,4 +49,4 @@ gym.register(
     },
 )
 
-__all__ = ['TaskDEnvCfg', 'TaskDEnvB2Cfg']
+__all__ = ['TaskDEnvCfg', 'TaskDEnvB2Cfg', 'TaskDFlatTrainEnvB2Cfg']
