@@ -76,6 +76,7 @@ class AlgSolution:
         self.SIDE_PUSH_START_X = -1.25
         self.DETACH_BACKUP_DISTANCE = 0.45
         self.detach_start_x = None
+        self.contact_ticks = 0
         self.BOX_LEFT_SIDE_Y = 2.65
         self.SIDE_FORWARD_TARGET_X = -1.25
         self.RIGHT_PUSH_TARGET_Y = 1.20
@@ -268,6 +269,10 @@ class AlgSolution:
             self.stuck_ticks += 1
         else:
             self.stuck_ticks = 0
+        if self.phase == "CONTACT_BOX" and dx < 0.002 and dy < 0.002:
+            self.contact_ticks += 1
+        else:
+            self.contact_ticks = 0
         self.prev_est_x = self.est_x
         self.prev_est_y = self.est_y
 
@@ -369,7 +374,11 @@ class AlgSolution:
         elif self.phase == "MOVE_LEFT_TO_BOX_LANE" and self.est_y >= self.BOX_LANE_Y:
             self.phase = "CONTACT_BOX"
             self.step = 0
-        elif self.phase == "CONTACT_BOX" and self.est_x >= self.CONTACT_TARGET_X:
+        elif self.phase == "CONTACT_BOX" and (
+            self.est_x >= self.CONTACT_TARGET_X
+            or self.contact_ticks >= 20
+            or (self.depth_box is not None and self.depth_box["distance"] <= 1.05)
+        ):
             self.phase = "PUSH_BOX"
             self.step = 0
         elif self.phase == "PUSH_BOX" and (
@@ -433,7 +442,8 @@ class AlgSolution:
     def _contact_box_action(self, obs, action_dim: int) -> torch.Tensor:
         """Creep forward to make contact before the strong push phase."""
         lin_y = self._depth_corrected_lateral_cmd(obs, base_lin_y=0.0, gain=0.30)
-        self._set_velocity_command(0.25, lin_y, 0.0)
+        yaw_cmd = float(max(-0.30, min(0.30, -1.2 * self.est_yaw)))
+        self._set_velocity_command(0.60, lin_y, yaw_cmd)
         return self._compute_base_action(obs, action_dim)
     
     def _push_box_action(self, obs, action_dim: int) -> torch.Tensor:
