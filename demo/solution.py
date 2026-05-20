@@ -66,9 +66,10 @@ class AlgSolution:
         self.step = 0 
 
         self.BACK_UP_STEPS = 110
-        self.MOVE_LEFT_STEPS = 230
+        self.MOVE_LEFT_STEPS = 320
         self.CONTACT_STEPS = 55
         self.PUSH_BOX_STEPS = 360
+        self.depth_box = None
 
 
     def _resolve_joint_ids(self, candidates: tuple[list[str], ...]) -> list[int]:
@@ -216,6 +217,88 @@ class AlgSolution:
             [lin_x, lin_y, ang_z], device=self.device, dtype=torch.float32
         ).view(1, 3)
 
+    def _get_image_tensor(self, obs, *names):
+        image_obs = obs.get("image", {}) if isinstance(obs, dict) else {}
+        if not isinstance(image_obs, dict):
+            return None
+        for name in names:
+            value = image_obs.get(name)
+            if value is not None:
+                return value
+        return None
+
+    def _get_depth_image(self, obs):
+        depth = self._get_image_tensor(obs, "head_depth", "video_depth", "ee_depth")
+        if depth is None:
+            return None
+
+        depth = depth.to(device=self.device, dtype=torch.float32)
+        if depth.ndim == 4:
+            depth = depth[0]
+        if depth.ndim == 3 and depth.shape[-1] == 1:
+            depth = depth[..., 0]
+        elif depth.ndim == 3 and depth.shape[0] == 1:
+            depth = depth[0]
+        if depth.ndim != 2:
+            return None
+        return depth
+
+    def _estimate_box_from_depth(self, obs):
+        """Estimate horizontal image error of the nearest box-like object in head depth."""
+        depth = self._get_depth_image(obs)
+        if depth is None:
+            self.depth_box = None
+            return None
+
+        height, width = depth.shape
+        row0, row1 = int(height * 0.30), int(height * 0.88)
+        col0, col1 = int(width * 0.08), int(width * 0.92)
+        roi = depth[row0:row1, col0:col1]
+
+        valid = torch.isfinite(roi) & (roi > 0.15) & (roi < 5.0)
+        valid_depth = roi[valid]
+        if valid_depth.numel() < 200:
+            self.depth_box = None
+            return None
+
+        # The box should be one of the nearest large objects in the head camera.
+        flat = valid_depth.flatten()
+        kth = max(1, int(flat.numel() * 0.18))
+        near_depth = torch.kthvalue(flat, kth).values + 0.25
+        near_mask = valid & (roi <= near_depth)
+        if near_mask.sum().item() < 120:
+            self.depth_box = None
+            return None
+
+        _ys, xs = torch.where(near_mask)
+        xs = xs.to(torch.float32) + float(col0)
+        center_x = xs.mean()
+        image_center_x = torch.tensor(float(width - 1) * 0.5, device=self.device)
+        x_error = ((center_x - image_center_x) / image_center_x).clamp(-1.0, 1.0)
+        distance = roi[near_mask].median()
+
+        estimate = {
+            "x_error": float(x_error.item()),
+            "distance": float(distance.item()),
+            "pixels": int(near_mask.sum().item()),
+        }
+        self.depth_box = estimate
+        return estimate
+
+    def _box_centered_from_depth(self, obs) -> bool:
+        estimate = self._estimate_box_from_depth(obs)
+        if estimate is None:
+            return False
+        return abs(estimate["x_error"]) < 0.16 and estimate["distance"] < 3.0
+
+    def _depth_corrected_lateral_cmd(self, obs, base_lin_y: float, gain: float = 0.35) -> float:
+        estimate = self._estimate_box_from_depth(obs)
+        if estimate is None:
+            return base_lin_y
+        # Negative image error means the box appears left; command +Y to move left.
+        corrected = base_lin_y - gain * estimate["x_error"]
+        return float(max(-0.55, min(0.55, corrected)))
+
     def predicts(self, obs, current_score):
         """Run policy inference and return current-env full-body action."""
         # if current_score > 1:
@@ -230,7 +313,7 @@ class AlgSolution:
                 self.step = 0
         elif self.phase == "MOVE_LEFT_TO_BOX_LANE":
             action = self._move_left_to_box_lane_action(obs, action_dim)
-            if self.step >= self.MOVE_LEFT_STEPS:
+            if self._box_centered_from_depth(obs) or self.step >= self.MOVE_LEFT_STEPS:
                 self.phase = "CONTACT_BOX"
                 self.step = 0
         elif self.phase == "CONTACT_BOX":
@@ -240,7 +323,7 @@ class AlgSolution:
                 self.step = 0 
         elif self.phase == "PUSH_BOX":
             action = self._push_box_action(obs, action_dim)
-            if self.step >= self.PUSH_BOX_STEPS:
+            if current_score >= 16.0 or self.step >= self.PUSH_BOX_STEPS:
                 self.phase = "CROSS"
                 self.step = 0
         else:
@@ -255,18 +338,21 @@ class AlgSolution:
         return self._compute_base_action(obs, action_dim)
 
     def _move_left_to_box_lane_action(self, obs, action_dim: int) -> torch.Tensor:
-        """Move toward y=+1.6 so the fixed box becomes directly in front of the robot."""
-        self._set_velocity_command(0.0, 0.50, 0.0)
+        """Move left, then use depth to center the visible box in the head camera."""
+        lin_y = self._depth_corrected_lateral_cmd(obs, base_lin_y=0.45, gain=0.45)
+        self._set_velocity_command(0.0, lin_y, 0.0)
         return self._compute_base_action(obs, action_dim)
 
     def _contact_box_action(self, obs, action_dim: int) -> torch.Tensor:
         """Creep forward to make contact before the strong push phase."""
-        self._set_velocity_command(0.25, 0.0, 0.0)
+        lin_y = self._depth_corrected_lateral_cmd(obs, base_lin_y=0.0, gain=0.30)
+        self._set_velocity_command(0.25, lin_y, 0.0)
         return self._compute_base_action(obs, action_dim)
     
     def _push_box_action(self, obs, action_dim: int) -> torch.Tensor:
         """Use a stronger +X command to push the box into the scoring x-range."""
-        self._set_velocity_command(0.85, 0.0, 0.0)
+        lin_y = self._depth_corrected_lateral_cmd(obs, base_lin_y=0.0, gain=0.25)
+        self._set_velocity_command(0.85, lin_y, 0.0)
         base_action = self._compute_base_action(obs, action_dim)
         return torch.clamp(base_action, -1.0, 1.0)
 
