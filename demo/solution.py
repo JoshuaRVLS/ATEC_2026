@@ -73,8 +73,8 @@ class AlgSolution:
         self.BACK_UP_TARGET_X = -3.55
         self.BOX_LANE_Y = 1.55
         self.CONTACT_TARGET_X = -3.08
-        self.SIDE_PUSH_START_X = -1.25
-        self.BOX_PRE_ROTATE_TARGET_X = -1.18
+        self.SIDE_PUSH_START_X = -1.55
+        self.BOX_PRE_ROTATE_TARGET_X = -1.55
         self.BOX_INSERT_TARGET_Y = 1.12
         self.BOX_INSERT_Y_TOL = 0.08
         self.BOX_EST_Y_MIN = 0.65
@@ -84,7 +84,7 @@ class AlgSolution:
         self.detach_start_x = None
         self.contact_ticks = 0
         self.BOX_LEFT_SIDE_Y = 2.65
-        self.ROTATE_CORNER_X = -1.05
+        self.ROTATE_CORNER_X = -1.45
         self.ROTATE_RIGHT_TARGET_Y = 1.62
         self.ROTATE_BOX_MIN_STEPS = 260
         self.ROTATE_BOX_MAX_STEPS = 520
@@ -99,8 +99,8 @@ class AlgSolution:
         self.ALIGN_BEHIND_BOX_MAX_STEPS = 300
         self.POST_INSERT_BACKUP_STEPS = 90
         self.POST_INSERT_BACKUP_MAX_STEPS = 240
-        self.PIT_GUARD_X = -0.92
-        self.PIT_RETREAT_X = -1.22
+        self.PIT_GUARD_X = -1.05
+        self.PIT_RETREAT_X = -1.35
         self.INSERT_MAX_ROBOT_X = -1.02
         self.RELEASE_SAFE_X = -1.25
         self.stuck_ticks = 0
