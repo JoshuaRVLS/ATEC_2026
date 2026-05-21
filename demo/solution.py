@@ -86,6 +86,9 @@ class AlgSolution:
         self.prev_est_x = self.est_x
         self.prev_est_y = self.est_y
         self.depth_box = None
+        self.lidar_box = None
+        self._printed_lidar_shape = False
+        self.LIDAR_CONTROL_SIGN = 1.0
         self._last_logged_phase = None
 
 
@@ -241,7 +244,7 @@ class AlgSolution:
                 f"[TaskD] phase={self.phase} step={self.step} "
                 f"cmd=({cmd[0]:+.2f}, {cmd[1]:+.2f}, {cmd[2]:+.2f}) "
                 f"pose=({self.est_x:+.2f}, {self.est_y:+.2f}, {self.est_yaw:+.2f}) "
-                f"depth_box={self.depth_box}"
+                f"depth_box={self.depth_box} lidar_box={self.lidar_box}"
             )
             self._last_logged_phase = self.phase
 
@@ -360,6 +363,105 @@ class AlgSolution:
         corrected = base_lin_y - gain * estimate["x_error"]
         return float(max(-0.55, min(0.55, corrected)))
 
+    def _get_lidar_scan(self, obs):
+        """Return the flattened Task D LiDAR observation from obs['extero']."""
+        scan = obs.get("extero") if isinstance(obs, dict) else None
+        if scan is None:
+            return None
+
+        scan = scan.to(device=self.device, dtype=torch.float32)
+        if scan.ndim == 1:
+            scan = scan.view(1, -1)
+        elif scan.ndim > 2:
+            scan = scan.reshape(scan.shape[0], -1)
+        return scan
+
+    def _estimate_box_from_lidar(self, obs):
+        """Estimate box bearing from LiDAR height/range outliers.
+
+        Task D's LiDAR is a flattened extero observation. The exact flattening can
+        differ across IsaacLab versions, so this keeps the estimator conservative:
+        reshape by 360 horizontal bins when possible, detect columns that look
+        different from the floor, then report their circular center angle.
+        """
+        scan = self._get_lidar_scan(obs)
+        if scan is None or scan.numel() == 0:
+            self.lidar_box = None
+            return None
+
+        flat = scan[0].flatten()
+        finite = torch.isfinite(flat)
+        valid = flat[finite]
+        if valid.numel() < 32:
+            self.lidar_box = None
+            return None
+
+        if not self._printed_lidar_shape:
+            sample = flat[: min(12, flat.numel())].detach().cpu().tolist()
+            print(
+                "[TaskD LiDAR] "
+                f"shape={tuple(scan.shape)} finite={int(finite.sum().item())}/{flat.numel()} "
+                f"min={float(valid.min().item()):+.3f} max={float(valid.max().item()):+.3f} "
+                f"mean={float(valid.mean().item()):+.3f} sample={sample}"
+            )
+            self._printed_lidar_shape = True
+
+        # Collapse vertical channels into horizontal bins. Most ATEC LiDAR patterns
+        # are 360 horizontal rays; if that changes, fall back to using all bins.
+        if flat.numel() % 360 == 0:
+            cols = flat.view(-1, 360)
+            col_finite = torch.isfinite(cols)
+            safe_cols = torch.where(col_finite, cols, torch.zeros_like(cols))
+            counts = col_finite.sum(dim=0).clamp_min(1)
+            horizontal = safe_cols.sum(dim=0) / counts
+        else:
+            horizontal = flat
+
+        finite_h = torch.isfinite(horizontal)
+        values = horizontal[finite_h]
+        if values.numel() < 32:
+            self.lidar_box = None
+            return None
+
+        median = values.median()
+        deviation = torch.abs(horizontal - median)
+        valid_deviation = deviation[finite_h]
+        kth_index = max(1, int(valid_deviation.numel() * 0.90))
+        threshold = torch.kthvalue(valid_deviation, kth_index).values.clamp_min(0.05)
+        mask = finite_h & (deviation >= threshold)
+
+        if int(mask.sum().item()) < 3:
+            self.lidar_box = None
+            return None
+
+        idx = torch.where(mask)[0].to(torch.float32)
+        weights = deviation[mask].clamp_min(1e-4)
+        num_bins = max(2, horizontal.numel())
+        angles = (idx / float(num_bins - 1)) * (2.0 * math.pi) - math.pi
+        sin_mean = torch.sum(weights * torch.sin(angles)) / torch.sum(weights)
+        cos_mean = torch.sum(weights * torch.cos(angles)) / torch.sum(weights)
+        bearing = math.atan2(float(sin_mean.item()), float(cos_mean.item()))
+
+        estimate = {
+            "bearing": bearing,
+            "count": int(mask.sum().item()),
+            "strength": float(weights.mean().item()),
+        }
+        self.lidar_box = estimate
+        return estimate
+
+    def _lidar_corrected_lateral_cmd(self, base_lin_y: float, gain: float = 0.20) -> float:
+        """Use LiDAR bearing as a small lateral correction toward the box."""
+        if self.lidar_box is None:
+            return base_lin_y
+
+        bearing = self.lidar_box["bearing"]
+        if abs(bearing) > 1.35:
+            return base_lin_y
+
+        corrected = base_lin_y + self.LIDAR_CONTROL_SIGN * gain * bearing
+        return float(max(-0.65, min(0.65, corrected)))
+
     def predicts(self, obs, current_score):
         """Run policy inference and return current-env full-body action."""
         # if current_score > 1:
@@ -369,6 +471,7 @@ class AlgSolution:
         action_dim = (int(proprio.shape[-1]) - 12) // 3
         self._update_pose_estimate(proprio)
         self._update_stuck_counter()
+        self._estimate_box_from_lidar(obs)
 
         if self.phase == "BACK_UP" and self.est_x <= self.BACK_UP_TARGET_X:
             self.phase = "MOVE_LEFT_TO_BOX_LANE"
@@ -441,14 +544,16 @@ class AlgSolution:
         return self._compute_base_action(obs, action_dim)
 
     def _move_left_to_box_lane_action(self, obs, action_dim: int) -> torch.Tensor:
-        """Move left, then use depth to center the visible box in the head camera."""
+        """Move left, then use sensors to center the visible box."""
         lin_y = self._depth_corrected_lateral_cmd(obs, base_lin_y=0.45, gain=0.45)
+        lin_y = self._lidar_corrected_lateral_cmd(lin_y, gain=0.18)
         self._set_velocity_command(-0.18, lin_y, 0.0)
         return self._compute_base_action(obs, action_dim)
 
     def _contact_box_action(self, obs, action_dim: int) -> torch.Tensor:
         """Creep forward to make contact before the strong push phase."""
         lin_y = self._depth_corrected_lateral_cmd(obs, base_lin_y=0.0, gain=0.30)
+        lin_y = self._lidar_corrected_lateral_cmd(lin_y, gain=0.12)
         yaw_cmd = float(max(-0.30, min(0.30, -1.2 * self.est_yaw)))
         self._set_velocity_command(0.60, lin_y, yaw_cmd)
         return self._compute_base_action(obs, action_dim)
@@ -456,6 +561,7 @@ class AlgSolution:
     def _push_box_action(self, obs, action_dim: int) -> torch.Tensor:
         """Use a stronger +X command to push the box into the scoring x-range."""
         lin_y = self._depth_corrected_lateral_cmd(obs, base_lin_y=0.0, gain=0.25)
+        lin_y = self._lidar_corrected_lateral_cmd(lin_y, gain=0.10)
         yaw_cmd = float(max(-0.30, min(0.30, -1.4 * self.est_yaw)))
         self._set_velocity_command(1.00, lin_y, yaw_cmd)
         base_action = self._compute_base_action(obs, action_dim)
