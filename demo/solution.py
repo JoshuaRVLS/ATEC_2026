@@ -129,6 +129,7 @@ class AlgSolution:
         self.rotate_strategy_names = ("LEFT_CORNER_CW", "RIGHT_CORNER_CCW", "SIDE_SWEEP")
         self.rotate_last_confidence = 0.0
         self.rotate_stagnant_pulses = 0
+        self.rotation_session_active = False
         self._printed_lidar_shape = False
         self.LIDAR_CONTROL_SIGN = 1.0
         self._last_logged_phase = None
@@ -775,6 +776,7 @@ class AlgSolution:
         elif self.phase == "PUSH_BOX" and (self._box_x_ready_for_rotation() or self.stuck_ticks >= 25):
             self.phase = "DETACH_FROM_BOX"
             self.detach_start_x = self.est_x
+            self.rotation_session_active = False
             self.step = 0
         elif (
             self.phase == "DETACH_FROM_BOX"
@@ -800,12 +802,14 @@ class AlgSolution:
             self.phase = "ROTATE_BOX_RIGHT"
             self.rotate_no_progress_ticks = 0
             self.rotate_release_ticks = 0
-            self.rotate_pulse_count = 0
-            self.box_est_yaw = 0.0
-            self.box_yaw_confidence = 0.0
-            self.rotate_strategy_index = 0
-            self.rotate_last_confidence = 0.0
-            self.rotate_stagnant_pulses = 0
+            if not self.rotation_session_active:
+                self.rotate_pulse_count = 0
+                self.box_est_yaw = 0.0
+                self.box_yaw_confidence = 0.0
+                self.rotate_strategy_index = 0
+                self.rotate_last_confidence = 0.0
+                self.rotate_stagnant_pulses = 0
+                self.rotation_session_active = True
             self.step = 0
         elif self.phase in ("ROTATE_BOX_RIGHT", "ROTATE_RELEASE_OBSERVE", "ALIGN_BEHIND_ROTATED_BOX", "INSERT_BOX_TO_HOLE") and (
             not self.bridge_ready and self.est_x > self.PIT_GUARD_X
@@ -837,6 +841,7 @@ class AlgSolution:
             elif self.rotate_pulse_count >= self.MAX_ROTATE_PULSES:
                 self.phase = "MOVE_FORWARD_BESIDE_BOX"
                 self.rotate_pulse_count = 0
+                self._advance_rotate_strategy()
             else:
                 self.phase = "ROTATE_BOX_RIGHT"
             self.rotate_no_progress_ticks = 0
@@ -861,6 +866,7 @@ class AlgSolution:
         ):
             self.bridge_ready = self._bridge_pose_ready()
             self.insert_attempts += 1
+            self.rotation_session_active = False
             self.phase = "RELEASE_BOX"
             self.step = 0
         elif self.phase == "RELEASE_BOX" and (
