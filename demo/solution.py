@@ -99,7 +99,6 @@ class AlgSolution:
         self.PIT_GUARD_X = -1.05
         self.INSERT_MAX_ROBOT_X = -1.05
         self.RELEASE_SAFE_X = -1.25
-        self.BRIDGE_SCORE_READY = 14.0
         self.stuck_ticks = 0
         self.prev_est_x = self.est_x
         self.prev_est_y = self.est_y
@@ -108,7 +107,7 @@ class AlgSolution:
         self.box_est_yaw = 0.0
         self.bridge_ready = False
         self.insert_attempts = 0
-        self.MAX_INSERT_ATTEMPTS = 2
+        self.MAX_INSERT_ATTEMPTS = 4
         self.current_score = 0.0
         self.depth_box = None
         self.lidar_box = None
@@ -355,8 +354,7 @@ class AlgSolution:
 
         self.box_est_y = float(max(self.BOX_EST_Y_MIN, min(self.BOX_EST_Y_MAX, self.box_est_y)))
 
-        if self.current_score >= self.BRIDGE_SCORE_READY:
-            self.bridge_ready = True
+        self.bridge_ready = self._bridge_pose_ready()
 
     def _box_x_ready_for_rotation(self) -> bool:
         return self.box_est_x >= self.BOX_PRE_ROTATE_TARGET_X or self.est_x >= self.SIDE_PUSH_START_X
@@ -367,11 +365,17 @@ class AlgSolution:
         return self.step >= self.ROTATE_BOX_MIN_STEPS and (yaw_ready or lidar_ready)
 
     def _box_inserted_enough(self) -> bool:
-        score_ready = self.current_score >= self.BRIDGE_SCORE_READY
         pose_ready = abs(self.box_est_y - self.BOX_INSERT_TARGET_Y) <= self.BOX_INSERT_Y_TOL
         sensor_ready = self._box_is_not_centered_front()
         robot_still_safe = self.est_x <= self.INSERT_MAX_ROBOT_X + 0.05
-        return score_ready or (self.step >= self.INSERT_BOX_MIN_STEPS and pose_ready and sensor_ready and robot_still_safe)
+        return self.step >= self.INSERT_BOX_MIN_STEPS and pose_ready and sensor_ready and robot_still_safe
+
+    def _bridge_pose_ready(self) -> bool:
+        """Only allow crossing when the estimated box pose can plausibly bridge the hole."""
+        y_ready = abs(self.box_est_y - self.BOX_INSERT_TARGET_Y) <= self.BOX_INSERT_Y_TOL
+        yaw_ready = self.box_est_yaw <= self.BOX_ROTATE_TARGET_YAW + 0.12
+        x_ready = self.box_est_x >= -0.85
+        return y_ready and yaw_ready and x_ready
 
     def _get_image_tensor(self, obs, *names):
         image_obs = obs.get("image", {}) if isinstance(obs, dict) else {}
@@ -684,7 +688,7 @@ class AlgSolution:
         elif self.phase == "INSERT_BOX_TO_HOLE" and (
             self._box_inserted_enough() or self.step >= self.INSERT_BOX_MAX_STEPS
         ):
-            self.bridge_ready = self.current_score >= self.BRIDGE_SCORE_READY
+            self.bridge_ready = self._bridge_pose_ready()
             self.insert_attempts += 1
             self.phase = "RELEASE_BOX"
             self.step = 0
@@ -692,11 +696,12 @@ class AlgSolution:
             (self.step >= self.POST_INSERT_BACKUP_STEPS and self.est_x <= self.RELEASE_SAFE_X)
             or self.step >= self.POST_INSERT_BACKUP_MAX_STEPS
         ):
-            if self.current_score >= self.BRIDGE_SCORE_READY:
-                self.bridge_ready = True
-            if self.bridge_ready or self.insert_attempts >= self.MAX_INSERT_ATTEMPTS:
+            self.bridge_ready = self._bridge_pose_ready()
+            if self.bridge_ready:
                 self.phase = "CROSS"
             else:
+                if self.insert_attempts >= self.MAX_INSERT_ATTEMPTS:
+                    self.insert_attempts = 0
                 self.phase = "ALIGN_BEHIND_ROTATED_BOX"
             self.step = 0
 
