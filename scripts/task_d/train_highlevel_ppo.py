@@ -38,6 +38,10 @@ parser.add_argument("--disable_fabric", action="store_true", default=False)
 parser.add_argument("--target_box_x", type=float, default=-0.35)
 parser.add_argument("--target_box_y", type=float, default=1.20)
 parser.add_argument("--target_box_yaw", type=float, default=math.pi / 2)
+parser.add_argument("--randomize_goal", action="store_true", default=False)
+parser.add_argument("--target_x_range", type=float, nargs=2, default=(-0.70, 0.20))
+parser.add_argument("--target_y_range", type=float, nargs=2, default=(0.90, 1.50))
+parser.add_argument("--target_yaw_range", type=float, nargs=2, default=(1.20, 1.90))
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
 args_cli.enable_cameras = True
@@ -207,7 +211,30 @@ def make_env():
     return env
 
 
-def get_scene_tensors(env, obs: dict) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+def make_goal(num_envs: int, device: str) -> torch.Tensor:
+    if args_cli.randomize_goal:
+        tx = torch.empty(num_envs, device=device).uniform_(*args_cli.target_x_range)
+        ty = torch.empty(num_envs, device=device).uniform_(*args_cli.target_y_range)
+        yaw = torch.empty(num_envs, device=device).uniform_(*args_cli.target_yaw_range)
+    else:
+        tx = torch.full((num_envs,), float(args_cli.target_box_x), device=device)
+        ty = torch.full((num_envs,), float(args_cli.target_box_y), device=device)
+        yaw = torch.full((num_envs,), float(args_cli.target_box_yaw), device=device)
+    return torch.stack([tx, ty, yaw], dim=-1)
+
+
+def goal_features(goal: torch.Tensor) -> torch.Tensor:
+    return torch.cat(
+        [
+            goal[:, 0:2],
+            torch.sin(goal[:, 2:3]),
+            torch.cos(goal[:, 2:3]),
+        ],
+        dim=-1,
+    )
+
+
+def get_scene_tensors(env, obs: dict, goal: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     unwrapped = env.unwrapped
     robot = unwrapped.scene["robot"]
     box = unwrapped.scene["box"]
@@ -222,10 +249,7 @@ def get_scene_tensors(env, obs: dict) -> tuple[torch.Tensor, torch.Tensor, torch
     base_ang_vel = proprio[:, 3:6]
     projected_gravity = proprio[:, 9:12]
     rel_box = box_pos[:, :2] - robot_pos[:, :2]
-    yaw_to_90 = torch.minimum(
-        torch.abs(angle_error(box_yaw.squeeze(-1), math.pi / 2)),
-        torch.abs(angle_error(box_yaw.squeeze(-1), -math.pi / 2)),
-    ).unsqueeze(-1)
+    yaw_to_goal = torch.abs(angle_error(box_yaw.squeeze(-1), goal[:, 2])).unsqueeze(-1)
 
     policy_obs = torch.cat(
         [
@@ -237,7 +261,8 @@ def get_scene_tensors(env, obs: dict) -> tuple[torch.Tensor, torch.Tensor, torch
             box_pos[:, :2],
             box_yaw,
             rel_box,
-            yaw_to_90,
+            yaw_to_goal,
+            goal_features(goal),
         ],
         dim=-1,
     ).to(args_cli.device, dtype=torch.float32)
@@ -252,14 +277,11 @@ def shaped_reward(
     box_pos: torch.Tensor,
     prev_box_pos: torch.Tensor,
     box_yaw: torch.Tensor,
+    goal: torch.Tensor,
     actions: torch.Tensor,
 ) -> torch.Tensor:
-    target_xy = torch.tensor(
-        [args_cli.target_box_x, args_cli.target_box_y],
-        device=args_cli.device,
-        dtype=torch.float32,
-    )
-    target_yaw = float(args_cli.target_box_yaw)
+    target_xy = goal[:, :2]
+    target_yaw = goal[:, 2]
 
     box_x = box_pos[:, 0]
     box_y = box_pos[:, 1]
@@ -355,8 +377,9 @@ def main():
     env = make_env()
     low_level = LowLevelLocomotion(args_cli.device)
     obs, _ = env.reset()
+    goal = make_goal(args_cli.num_envs, args_cli.device)
 
-    first_policy_obs, _robot_pos, box_pos = get_scene_tensors(env, obs)
+    first_policy_obs, _robot_pos, box_pos = get_scene_tensors(env, obs, goal)
     obs_dim = int(first_policy_obs.shape[-1])
     model = ActorCritic(obs_dim).to(args_cli.device)
     optimizer = torch.optim.Adam(model.parameters(), lr=args_cli.lr)
@@ -395,7 +418,7 @@ def main():
 
         episode_reward = 0.0
         for t in range(args_cli.horizon):
-            policy_obs, robot_pos, box_pos = get_scene_tensors(env, obs)
+            policy_obs, robot_pos, box_pos = get_scene_tensors(env, obs, goal)
 
             batch_mean = policy_obs.mean(dim=0)
             batch_var = policy_obs.var(dim=0, unbiased=False)
@@ -417,7 +440,7 @@ def main():
                 env_action = low_level(obs, command)
 
             next_obs, env_reward, terminated, truncated, _info = env.step(env_action)
-            next_policy_obs, next_robot_pos, next_box_pos = get_scene_tensors(env, next_obs)
+            next_policy_obs, next_robot_pos, next_box_pos = get_scene_tensors(env, next_obs, goal)
             box_yaw = next_policy_obs[:, 14]
             done = (terminated | truncated).to(args_cli.device, dtype=torch.float32).reshape(-1)
             reward = shaped_reward(
@@ -427,6 +450,7 @@ def main():
                 next_box_pos,
                 prev_box_pos,
                 box_yaw,
+                goal,
                 command,
             )
 
@@ -443,11 +467,12 @@ def main():
 
             if bool((terminated | truncated).any().item()):
                 obs, _ = env.reset()
-                _policy_obs, _robot_pos, prev_box_pos = get_scene_tensors(env, obs)
+                goal = make_goal(args_cli.num_envs, args_cli.device)
+                _policy_obs, _robot_pos, prev_box_pos = get_scene_tensors(env, obs, goal)
                 prev_box_pos = prev_box_pos.detach().clone()
 
         with torch.no_grad():
-            last_policy_obs, _robot_pos, _box_pos = get_scene_tensors(env, obs)
+            last_policy_obs, _robot_pos, _box_pos = get_scene_tensors(env, obs, goal)
             obs_std = torch.sqrt(obs_var).clamp_min(1e-4)
             last_value = model.critic((last_policy_obs - obs_mean) / obs_std).squeeze(-1)
 
