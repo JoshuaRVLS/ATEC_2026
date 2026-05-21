@@ -44,6 +44,9 @@ parser.add_argument("--target_x_range", type=float, nargs=2, default=(-0.70, 0.2
 parser.add_argument("--target_y_range", type=float, nargs=2, default=(0.90, 1.50))
 parser.add_argument("--target_yaw_range", type=float, nargs=2, default=(1.20, 1.90))
 parser.add_argument("--command_scale", type=float, nargs=3, default=(0.45, 0.45, 0.25))
+parser.add_argument("--command_smoothing", type=float, default=0.20)
+parser.add_argument("--log_std_min", type=float, default=-2.0)
+parser.add_argument("--log_std_max", type=float, default=-0.7)
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
 args_cli.enable_cameras = True
@@ -177,7 +180,7 @@ class ActorCritic(nn.Module):
 
     def distribution(self, obs: torch.Tensor) -> torch.distributions.Normal:
         mean = torch.tanh(self.actor(obs))
-        std = torch.exp(self.log_std).expand_as(mean)
+        std = torch.exp(self.log_std.clamp(args_cli.log_std_min, args_cli.log_std_max)).expand_as(mean)
         return torch.distributions.Normal(mean, std)
 
     def act(self, obs: torch.Tensor):
@@ -416,6 +419,7 @@ def main():
         print(f"[ppo] resumed {args_cli.resume} from iteration {start_iteration}")
 
     prev_box_pos = box_pos.detach().clone()
+    prev_command = torch.zeros((args_cli.num_envs, 3), device=args_cli.device)
 
     end_iteration = start_iteration + args_cli.iterations - 1
     for iteration in range(start_iteration, end_iteration + 1):
@@ -447,6 +451,8 @@ def main():
             norm_obs = (policy_obs - obs_mean) / obs_std
             with torch.no_grad():
                 raw_action, command, logprob, value = model.act(norm_obs)
+                alpha = float(args_cli.command_smoothing)
+                command = (1.0 - alpha) * prev_command + alpha * command
                 env_action = low_level(obs, command)
 
             next_obs, env_reward, terminated, truncated, _info = env.step(env_action)
@@ -474,12 +480,14 @@ def main():
             episode_reward += float(reward.mean().item())
             obs = next_obs
             prev_box_pos = next_box_pos.detach().clone()
+            prev_command = command.detach().clone()
 
             if bool((terminated | truncated).any().item()):
                 obs, _ = env.reset()
                 goal = make_goal(args_cli.num_envs, args_cli.device)
                 _policy_obs, _robot_pos, prev_box_pos = get_scene_tensors(env, obs, goal)
                 prev_box_pos = prev_box_pos.detach().clone()
+                prev_command.zero_()
 
         with torch.no_grad():
             last_policy_obs, _robot_pos, _box_pos = get_scene_tensors(env, obs, goal)
@@ -524,6 +532,8 @@ def main():
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), args_cli.max_grad_norm)
                 optimizer.step()
+                with torch.no_grad():
+                    model.log_std.clamp_(args_cli.log_std_min, args_cli.log_std_max)
 
                 policy_loss_value = float(policy_loss.item())
                 value_loss_value = float(value_loss.item())
