@@ -89,8 +89,14 @@ class AlgSolution:
         self.INSERT_BOX_TARGET_Y = 0.92
         self.INSERT_BOX_MIN_STEPS = 220
         self.INSERT_BOX_MAX_STEPS = 620
+        self.ALIGN_BEHIND_BOX_MIN_STEPS = 120
+        self.ALIGN_BEHIND_BOX_MAX_STEPS = 300
         self.POST_INSERT_BACKUP_STEPS = 90
-        self.PIT_GUARD_X = -0.82
+        self.POST_INSERT_BACKUP_MAX_STEPS = 240
+        self.PIT_GUARD_X = -1.05
+        self.INSERT_MAX_ROBOT_X = -1.05
+        self.RELEASE_SAFE_X = -1.25
+        self.BRIDGE_SCORE_READY = 14.0
         self.stuck_ticks = 0
         self.prev_est_x = self.est_x
         self.prev_est_y = self.est_y
@@ -98,6 +104,8 @@ class AlgSolution:
         self.box_est_y = 1.6
         self.box_est_yaw = 0.0
         self.bridge_ready = False
+        self.insert_attempts = 0
+        self.MAX_INSERT_ATTEMPTS = 2
         self.current_score = 0.0
         self.depth_box = None
         self.lidar_box = None
@@ -251,6 +259,8 @@ class AlgSolution:
         return self._map_policy_action_to_env_action(action_train, action_dim)
 
     def _set_velocity_command(self, lin_x: float, lin_y: float, ang_z: float) -> None:
+        if self.phase == "INSERT_BOX_TO_HOLE" and self.est_x > self.INSERT_MAX_ROBOT_X:
+            lin_x = min(lin_x, -0.15)
         if not self.bridge_ready and self.phase != "INSERT_BOX_TO_HOLE" and self.est_x > self.PIT_GUARD_X:
             lin_x = min(lin_x, 0.10)
         self.fixed_velocity_commands = torch.tensor(
@@ -265,7 +275,7 @@ class AlgSolution:
                 f"cmd=({cmd[0]:+.2f}, {cmd[1]:+.2f}, {cmd[2]:+.2f}) "
                 f"pose=({self.est_x:+.2f}, {self.est_y:+.2f}, {self.est_yaw:+.2f}) "
                 f"box_est=({self.box_est_x:+.2f}, {self.box_est_y:+.2f}, {self.box_est_yaw:+.2f}) "
-                f"bridge_ready={self.bridge_ready} "
+                f"bridge_ready={self.bridge_ready} insert_attempts={self.insert_attempts} "
                 f"depth_box={self.depth_box} lidar_box={self.lidar_box}"
             )
             self._last_logged_phase = self.phase
@@ -337,7 +347,7 @@ class AlgSolution:
         elif self.phase == "INSERT_BOX_TO_HOLE":
             self.box_est_y = max(self.BOX_INSERT_TARGET_Y - 0.10, self.box_est_y - 0.0045)
 
-        if self.current_score >= 14.0:
+        if self.current_score >= self.BRIDGE_SCORE_READY:
             self.bridge_ready = True
 
     def _box_x_ready_for_rotation(self) -> bool:
@@ -349,10 +359,11 @@ class AlgSolution:
         return self.step >= self.ROTATE_BOX_MIN_STEPS and (yaw_ready or lidar_ready)
 
     def _box_inserted_enough(self) -> bool:
-        score_ready = self.current_score >= 14.0
+        score_ready = self.current_score >= self.BRIDGE_SCORE_READY
         pose_ready = self.box_est_y <= self.BOX_INSERT_TARGET_Y + 0.06
         sensor_ready = self._box_is_not_centered_front()
-        return score_ready or (self.step >= self.INSERT_BOX_MIN_STEPS and pose_ready and sensor_ready)
+        robot_still_safe = self.est_x <= self.INSERT_MAX_ROBOT_X + 0.05
+        return score_ready or (self.step >= self.INSERT_BOX_MIN_STEPS and pose_ready and sensor_ready and robot_still_safe)
 
     def _get_image_tensor(self, obs, *names):
         image_obs = obs.get("image", {}) if isinstance(obs, dict) else {}
@@ -655,16 +666,30 @@ class AlgSolution:
         elif self.phase == "ROTATE_BOX_RIGHT" and (
             self._box_rotation_ready() or self.step >= self.ROTATE_BOX_MAX_STEPS
         ):
+            self.phase = "ALIGN_BEHIND_ROTATED_BOX"
+            self.step = 0
+        elif self.phase == "ALIGN_BEHIND_ROTATED_BOX" and (
+            self._behind_rotated_box_ready() or self.step >= self.ALIGN_BEHIND_BOX_MAX_STEPS
+        ):
             self.phase = "INSERT_BOX_TO_HOLE"
             self.step = 0
         elif self.phase == "INSERT_BOX_TO_HOLE" and (
             self._box_inserted_enough() or self.step >= self.INSERT_BOX_MAX_STEPS
         ):
-            self.bridge_ready = True
+            self.bridge_ready = self.current_score >= self.BRIDGE_SCORE_READY
+            self.insert_attempts += 1
             self.phase = "RELEASE_BOX"
             self.step = 0
-        elif self.phase == "RELEASE_BOX" and self.step >= self.POST_INSERT_BACKUP_STEPS:
-            self.phase = "CROSS"
+        elif self.phase == "RELEASE_BOX" and (
+            (self.step >= self.POST_INSERT_BACKUP_STEPS and self.est_x <= self.RELEASE_SAFE_X)
+            or self.step >= self.POST_INSERT_BACKUP_MAX_STEPS
+        ):
+            if self.current_score >= self.BRIDGE_SCORE_READY:
+                self.bridge_ready = True
+            if self.bridge_ready or self.insert_attempts >= self.MAX_INSERT_ATTEMPTS:
+                self.phase = "CROSS"
+            else:
+                self.phase = "ALIGN_BEHIND_ROTATED_BOX"
             self.step = 0
 
         if self.phase == "BACK_UP":
@@ -683,6 +708,8 @@ class AlgSolution:
             action = self._move_forward_beside_box_action(obs, action_dim)
         elif self.phase == "ROTATE_BOX_RIGHT":
             action = self._rotate_box_right_action(obs, action_dim)
+        elif self.phase == "ALIGN_BEHIND_ROTATED_BOX":
+            action = self._align_behind_rotated_box_action(obs, action_dim)
         elif self.phase == "INSERT_BOX_TO_HOLE":
             action = self._insert_box_to_hole_action(obs, action_dim)
         elif self.phase == "RELEASE_BOX":
@@ -759,17 +786,42 @@ class AlgSolution:
         return torch.clamp(base_action, -1.0, 1.0)
 
     def _insert_box_to_hole_action(self, obs, action_dim: int) -> torch.Tensor:
-        """After rotation, push the box toward the pit/hole lane."""
+        """Push from behind the rotated box toward the pit/hole lane."""
         yaw_cmd = float(max(-0.35, min(0.35, -1.6 * self.est_yaw)))
         y_error = max(0.0, self.box_est_y - self.BOX_INSERT_TARGET_Y)
-        forward_cmd = 0.08
+        # At this point the robot should be behind the rotated box, so insertion
+        # should mostly be a straight -Y push, not another corner rotation.
+        forward_cmd = 0.00
         side_cmd = float(max(-1.0, min(-0.55, -0.62 - 0.55 * y_error)))
         if self.lidar_box is not None:
-            # If the box drifts too far front/left in LiDAR, add a little +X pressure.
-            forward_cmd = float(max(0.04, min(0.22, 0.08 + 0.06 * abs(self.lidar_box["bearing"]))))
+            # Keep the box roughly centered while pushing from behind.
+            forward_cmd = float(max(-0.12, min(0.12, 0.08 * self.lidar_box["bearing"])))
+        if self.est_x > self.INSERT_MAX_ROBOT_X:
+            forward_cmd = -0.20
         self._set_velocity_command(forward_cmd, side_cmd, yaw_cmd)
         base_action = self._compute_base_action(obs, action_dim)
         return torch.clamp(base_action, -1.0, 1.0)
+
+    def _behind_rotated_box_ready(self) -> bool:
+        """Check whether robot has left the corner and is behind the rotated box."""
+        if self.step < self.ALIGN_BEHIND_BOX_MIN_STEPS:
+            return False
+        safe_x = self.est_x <= self.INSERT_MAX_ROBOT_X + 0.05
+        behind_y = self.est_y >= self.box_est_y + 0.55
+        lidar_ok = self.lidar_box is None or abs(self.lidar_box["bearing"]) < 1.45
+        return safe_x and behind_y and lidar_ok
+
+    def _align_behind_rotated_box_action(self, obs, action_dim: int) -> torch.Tensor:
+        """Move off the corner contact and line up behind the rotated box."""
+        target_x = min(self.INSERT_MAX_ROBOT_X - 0.05, self.box_est_x - 0.05)
+        target_y = self.box_est_y + 0.75
+        x_error = target_x - self.est_x
+        y_error = target_y - self.est_y
+        lin_x = float(max(-0.45, min(0.25, 0.9 * x_error)))
+        lin_y = float(max(-0.30, min(0.65, 0.9 * y_error)))
+        yaw_cmd = float(max(-0.35, min(0.35, -1.5 * self.est_yaw)))
+        self._set_velocity_command(lin_x, lin_y, yaw_cmd)
+        return self._compute_base_action(obs, action_dim)
 
     def _box_seen_on_right_side(self) -> bool:
         """Return True once LiDAR suggests the box has moved to robot's right side."""
@@ -791,7 +843,12 @@ class AlgSolution:
 
     def _cross_action(self, obs, action_dim: int) -> torch.Tensor:
         """Continue forward after the box interaction attempt."""
-        self._set_velocity_command(0.75, 0.0, 0.0)
+        if not self.bridge_ready:
+            # Last-resort crossing should be cautious; the global pit guard will
+            # also clamp forward velocity if the bridge is not confirmed.
+            self._set_velocity_command(0.20, 0.0, 0.0)
+        else:
+            self._set_velocity_command(0.75, 0.0, 0.0)
         return self._compute_base_action(obs, action_dim)
 
         # with torch.inference_mode():
