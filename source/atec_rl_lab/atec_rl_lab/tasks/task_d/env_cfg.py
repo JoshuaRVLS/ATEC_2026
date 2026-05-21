@@ -11,6 +11,7 @@ from isaaclab.managers import RewardTermCfg as RewTerm
 from isaaclab.managers import TerminationTermCfg as DoneTerm
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.assets import RigidObjectCfg
+from isaaclab.sensors import MultiMeshRayCasterCfg
 import isaaclab.sim as sim_utils
 
 from atec_rl_lab.tasks.task_base import BaseEnvCfg
@@ -93,6 +94,30 @@ class TaskDEnvCfg(BaseEnvCfg):
             ),
         )
         self.sim.physics_material = self.scene.terrain.physics_material
+
+        if self.scene.lidar_sensor is not None:
+            lidar_sensor = self.scene.lidar_sensor
+            self.scene.lidar_sensor = MultiMeshRayCasterCfg(
+                prim_path=lidar_sensor.prim_path,
+                update_period=lidar_sensor.update_period,
+                pattern_cfg=lidar_sensor.pattern_cfg,
+                max_distance=lidar_sensor.max_distance,
+                debug_vis=lidar_sensor.debug_vis,
+                offset=lidar_sensor.offset,
+                attach_yaw_only=lidar_sensor.attach_yaw_only,
+                ray_alignment=lidar_sensor.ray_alignment,
+                drift_range=lidar_sensor.drift_range,
+                ray_cast_drift_range=lidar_sensor.ray_cast_drift_range,
+                visualizer_cfg=lidar_sensor.visualizer_cfg,
+                mesh_prim_paths=[
+                    "/World/ground",
+                    MultiMeshRayCasterCfg.RaycastTargetCfg(
+                        prim_expr="{ENV_REGEX_NS}/Box",
+                        is_shared=True,
+                        track_mesh_transforms=True,
+                    ),
+                ],
+            )
 
         # Task D reward
         self.rewards = RewardsCfg()
