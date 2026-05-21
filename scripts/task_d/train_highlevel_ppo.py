@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import math
 import os
 import sys
@@ -362,7 +363,8 @@ def export_policy(model: ActorCritic, obs_mean: torch.Tensor, obs_std: torch.Ten
             obs = (obs - self.mean) / self.std
             return torch.tanh(self.actor(obs)) * self.command_scale
 
-    export = ExportedPolicy(model.cpu().eval(), obs_mean, obs_std).eval()
+    export_actor_critic = copy.deepcopy(model).cpu().eval()
+    export = ExportedPolicy(export_actor_critic, obs_mean, obs_std).eval()
     example = torch.zeros((1, obs_mean.numel()), dtype=torch.float32)
     scripted = torch.jit.trace(export, example)
     out = Path(out_path)
