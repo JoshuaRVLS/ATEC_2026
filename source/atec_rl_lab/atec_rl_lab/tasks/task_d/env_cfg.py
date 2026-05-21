@@ -207,6 +207,10 @@ class TaskDFlatTrainEnvB2Cfg(TaskDEnvB2Cfg):
     def _build_terrain_cfg(self):
         return copy.deepcopy(TASK_D_FLAT_TRAIN_TERRAIN_CFG)
 
+    def __post_init__(self):
+        super().__post_init__()
+        self.scene.env_spacing = 8.0
+
 
 @configclass
 class TaskDEnvB2WCfg(TaskDEnvCfg):
