@@ -96,8 +96,9 @@ class AlgSolution:
         self.ALIGN_BEHIND_BOX_MAX_STEPS = 300
         self.POST_INSERT_BACKUP_STEPS = 90
         self.POST_INSERT_BACKUP_MAX_STEPS = 240
-        self.PIT_GUARD_X = -1.05
-        self.INSERT_MAX_ROBOT_X = -1.05
+        self.PIT_GUARD_X = -1.15
+        self.PIT_RETREAT_X = -1.35
+        self.INSERT_MAX_ROBOT_X = -1.15
         self.RELEASE_SAFE_X = -1.25
         self.stuck_ticks = 0
         self.prev_est_x = self.est_x
@@ -265,10 +266,10 @@ class AlgSolution:
         return self._map_policy_action_to_env_action(action_train, action_dim)
 
     def _set_velocity_command(self, lin_x: float, lin_y: float, ang_z: float) -> None:
+        if not self.bridge_ready and self.est_x > self.PIT_GUARD_X:
+            lin_x = min(lin_x, -0.35)
         if self.phase == "INSERT_BOX_TO_HOLE" and self.est_x > self.INSERT_MAX_ROBOT_X:
             lin_x = min(lin_x, -0.15)
-        if not self.bridge_ready and self.phase != "INSERT_BOX_TO_HOLE" and self.est_x > self.PIT_GUARD_X:
-            lin_x = min(lin_x, 0.10)
         self.fixed_velocity_commands = torch.tensor(
             [lin_x, lin_y, ang_z], device=self.device, dtype=torch.float32
         ).view(1, 3)
@@ -710,6 +711,14 @@ class AlgSolution:
             self.rotate_no_progress_ticks = 0
             self.rotate_release_ticks = 0
             self.step = 0
+        elif self.phase in ("ROTATE_BOX_RIGHT", "ALIGN_BEHIND_ROTATED_BOX", "INSERT_BOX_TO_HOLE") and (
+            not self.bridge_ready and self.est_x > self.PIT_GUARD_X
+        ):
+            self.phase = "RETREAT_FROM_PIT"
+            self.step = 0
+        elif self.phase == "RETREAT_FROM_PIT" and self.est_x <= self.PIT_RETREAT_X:
+            self.phase = "MOVE_FORWARD_BESIDE_BOX" if not self._box_rotation_ready() else "ALIGN_BEHIND_ROTATED_BOX"
+            self.step = 0
         elif self.phase == "ROTATE_BOX_RIGHT" and self._box_rotation_ready():
             self.phase = "ALIGN_BEHIND_ROTATED_BOX"
             self.step = 0
@@ -770,6 +779,8 @@ class AlgSolution:
             action = self._move_forward_beside_box_action(obs, action_dim)
         elif self.phase == "ROTATE_BOX_RIGHT":
             action = self._rotate_box_right_action(obs, action_dim)
+        elif self.phase == "RETREAT_FROM_PIT":
+            action = self._retreat_from_pit_action(obs, action_dim)
         elif self.phase == "ALIGN_BEHIND_ROTATED_BOX":
             action = self._align_behind_rotated_box_action(obs, action_dim)
         elif self.phase == "INSERT_BOX_TO_HOLE":
@@ -837,6 +848,10 @@ class AlgSolution:
     def _rotate_box_right_action(self, obs, action_dim: int) -> torch.Tensor:
         """Push the box corner diagonally so the box rotates before insertion."""
         yaw_cmd = float(max(-0.35, min(0.35, -1.6 * self.est_yaw)))
+        if not self.bridge_ready and self.est_x > self.PIT_GUARD_X:
+            self._set_velocity_command(-0.45, 0.15, yaw_cmd)
+            return self._compute_base_action(obs, action_dim)
+
         if self._rotation_contact_stalled():
             self.rotate_release_ticks += 1
             # We are likely pushing a face/wall instead of the corner. Release
@@ -860,6 +875,12 @@ class AlgSolution:
         self._set_velocity_command(forward_cmd, side_cmd, yaw_cmd)
         base_action = self._compute_base_action(obs, action_dim)
         return torch.clamp(base_action, -1.0, 1.0)
+
+    def _retreat_from_pit_action(self, obs, action_dim: int) -> torch.Tensor:
+        """Move back to a safe x before attempting more box manipulation."""
+        yaw_cmd = float(max(-0.35, min(0.35, -1.5 * self.est_yaw)))
+        self._set_velocity_command(-0.65, 0.20, yaw_cmd)
+        return self._compute_base_action(obs, action_dim)
 
     def _insert_box_to_hole_action(self, obs, action_dim: int) -> torch.Tensor:
         """Push from behind the rotated box toward the pit/hole lane."""
