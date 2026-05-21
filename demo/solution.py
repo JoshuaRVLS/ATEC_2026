@@ -109,6 +109,7 @@ class AlgSolution:
         self.box_est_x = -3.0
         self.box_est_y = 1.6
         self.box_est_yaw = 0.0
+        self.box_yaw_confidence = 0.0
         self.bridge_ready = False
         self.insert_attempts = 0
         self.MAX_INSERT_ATTEMPTS = 4
@@ -124,6 +125,10 @@ class AlgSolution:
         self.rotate_no_progress_ticks = 0
         self.rotate_release_ticks = 0
         self.rotate_pulse_count = 0
+        self.rotate_strategy_index = 0
+        self.rotate_strategy_names = ("LEFT_CORNER_CW", "RIGHT_CORNER_CCW", "SIDE_SWEEP")
+        self.rotate_last_confidence = 0.0
+        self.rotate_stagnant_pulses = 0
         self._printed_lidar_shape = False
         self.LIDAR_CONTROL_SIGN = 1.0
         self._last_logged_phase = None
@@ -286,8 +291,9 @@ class AlgSolution:
                 f"cmd=({cmd[0]:+.2f}, {cmd[1]:+.2f}, {cmd[2]:+.2f}) "
                 f"pose=({self.est_x:+.2f}, {self.est_y:+.2f}, {self.est_yaw:+.2f}) "
                 f"box_est=({self.box_est_x:+.2f}, {self.box_est_y:+.2f}, {self.box_est_yaw:+.2f}) "
+                f"yaw_conf={self.box_yaw_confidence:.2f} "
                 f"bridge_ready={self.bridge_ready} insert_attempts={self.insert_attempts} "
-                f"rotate_pulses={self.rotate_pulse_count} "
+                f"rotate_pulses={self.rotate_pulse_count} rotate_strategy={self._rotate_strategy_name()} "
                 f"depth_box={self.depth_box} lidar_box={self.lidar_box}"
             )
             self._last_logged_phase = self.phase
@@ -332,11 +338,23 @@ class AlgSolution:
         assumptions with LiDAR bearing changes so phase decisions can target the
         box pose instead of relying only on fixed step counts.
         """
-        if self.lidar_box is not None and self.lidar_box["range"] <= 3.2 and self.lidar_box["count"] >= 8:
+        if self.depth_box is not None:
+            # Depth bbox is trusted only when it covers a plausible object-sized
+            # region. It gives image-space centering, not full world pose.
+            depth_bearing = 0.65 * self.depth_box["x_error"]
+            depth_range = self.depth_box["distance"]
+            if 0.35 <= depth_range <= 3.2:
+                bearing_world = self.est_yaw + depth_bearing
+                depth_x = self.est_x + math.cos(bearing_world) * depth_range
+                depth_y = self.est_y + math.sin(bearing_world) * depth_range
+                self.box_est_x = 0.90 * self.box_est_x + 0.10 * depth_x
+                self.box_est_y = 0.88 * self.box_est_y + 0.12 * depth_y
+
+        if self.lidar_box is not None and self.lidar_box["range"] <= 2.6 and self.lidar_box["count"] >= 12:
             bearing = self.lidar_box["bearing"]
             # Avoid fusing side/back wall-like clusters as box position. During
             # corner/behind alignment, LiDAR often sees the box from the side.
-            if abs(bearing) < 1.45 or self.phase in ("MOVE_LEFT_TO_BOX_LANE", "CONTACT_BOX", "PUSH_BOX"):
+            if abs(bearing) < 1.10 or self.phase in ("MOVE_LEFT_TO_BOX_LANE", "CONTACT_BOX", "PUSH_BOX"):
                 bearing_world = self.est_yaw + bearing
                 range_proxy = self.lidar_box.get("range", 1.2)
                 lidar_x = self.est_x + math.cos(bearing_world) * range_proxy
@@ -356,18 +374,15 @@ class AlgSolution:
         elif self.phase == "ROTATE_BOX_RIGHT":
             yaw_before = self.box_est_yaw
             sensor_rotation = self._lidar_rotation_progress()
-            if sensor_rotation > 0.002:
+            if sensor_rotation > 0.006:
                 yaw_step = min(0.030, 0.004 + sensor_rotation)
                 self.box_est_yaw = max(self.BOX_ROTATE_TARGET_YAW, self.box_est_yaw - yaw_step)
-            elif self.step > 80:
-                # Very small model drift so we don't wait forever on noisy LiDAR,
-                # but this is intentionally much weaker than sensor-confirmed progress.
-                self.box_est_yaw = max(self.BOX_ROTATE_TARGET_YAW, self.box_est_yaw - 0.001)
 
             if abs(self.box_est_yaw - yaw_before) < 0.0015:
                 self.rotate_no_progress_ticks += 1
             else:
                 self.rotate_no_progress_ticks = 0
+                self.box_yaw_confidence = min(1.0, self.box_yaw_confidence + 0.05)
 
         elif self.phase == "INSERT_BOX_TO_HOLE":
             y_error = self.box_est_y - self.BOX_INSERT_TARGET_Y
@@ -382,7 +397,8 @@ class AlgSolution:
 
     def _box_rotation_ready(self) -> bool:
         yaw_ready = self.box_est_yaw <= self.BOX_ROTATE_TARGET_YAW + 0.10
-        return self._rotate_elapsed_steps() >= self.ROTATE_BOX_MIN_STEPS and yaw_ready
+        confidence_ready = self.box_yaw_confidence >= 0.35
+        return self._rotate_elapsed_steps() >= self.ROTATE_BOX_MIN_STEPS and yaw_ready and confidence_ready
 
     def _at_rotate_lane(self) -> bool:
         """Robot must be on the +Y/left side before applying clockwise box rotation."""
@@ -394,6 +410,23 @@ class AlgSolution:
 
     def _box_rotation_progress_seen(self) -> bool:
         return self._lidar_rotation_progress() > 0.002 or self.box_est_yaw <= -0.80
+
+    def _rotate_strategy_name(self) -> str:
+        return self.rotate_strategy_names[self.rotate_strategy_index % len(self.rotate_strategy_names)]
+
+    def _advance_rotate_strategy(self) -> None:
+        self.rotate_strategy_index = (self.rotate_strategy_index + 1) % len(self.rotate_strategy_names)
+        self.rotate_stagnant_pulses = 0
+
+    def _update_rotate_strategy_after_pulse(self) -> None:
+        confidence_gain = self.box_yaw_confidence - self.rotate_last_confidence
+        if confidence_gain < 0.03:
+            self.rotate_stagnant_pulses += 1
+        else:
+            self.rotate_stagnant_pulses = 0
+        self.rotate_last_confidence = self.box_yaw_confidence
+        if self.rotate_stagnant_pulses >= 2:
+            self._advance_rotate_strategy()
 
     def _lidar_rotation_progress(self) -> float:
         """Sensor cue that the box is rotating under diagonal contact."""
@@ -417,8 +450,9 @@ class AlgSolution:
         """Only allow crossing when the estimated box pose can plausibly bridge the hole."""
         y_ready = abs(self.box_est_y - self.BOX_INSERT_TARGET_Y) <= self.BOX_INSERT_Y_TOL
         yaw_ready = self.box_est_yaw <= self.BOX_ROTATE_TARGET_YAW + 0.12
+        confidence_ready = self.box_yaw_confidence >= 0.35
         x_ready = self.box_est_x >= -0.85
-        return y_ready and yaw_ready and x_ready
+        return y_ready and yaw_ready and confidence_ready and x_ready
 
     def _get_image_tensor(self, obs, *names):
         image_obs = obs.get("image", {}) if isinstance(obs, dict) else {}
@@ -447,7 +481,12 @@ class AlgSolution:
         return depth
 
     def _estimate_box_from_depth(self, obs):
-        """Estimate horizontal image error of the nearest box-like object in head depth."""
+        """Estimate a plausible box bbox from head depth.
+
+        The old detector accepted almost the whole image as "box" when depth was
+        flat. This version requires an object-sized connected projection: enough
+        near pixels, but not a full-frame mask.
+        """
         depth = self._get_depth_image(obs)
         if depth is None:
             self.depth_box = None
@@ -464,26 +503,56 @@ class AlgSolution:
             self.depth_box = None
             return None
 
-        # The box should be one of the nearest large objects in the head camera.
+        # The box should be one of the nearest large objects in the head camera,
+        # but not the entire floor/platform.
         flat = valid_depth.flatten()
         kth = max(1, int(flat.numel() * 0.18))
         near_depth = torch.kthvalue(flat, kth).values + 0.25
         near_mask = valid & (roi <= near_depth)
-        if near_mask.sum().item() < 120:
+        near_pixels = int(near_mask.sum().item())
+        roi_pixels = int(roi.numel())
+        area_frac = float(near_pixels) / float(max(1, roi_pixels))
+        if near_pixels < 120 or area_frac > 0.55:
             self.depth_box = None
             return None
 
-        _ys, xs = torch.where(near_mask)
+        ys_roi, xs_roi = torch.where(near_mask)
+        row_counts = near_mask.sum(dim=1)
+        col_counts = near_mask.sum(dim=0)
+        row_keep = row_counts > max(3, int(0.025 * near_mask.shape[1]))
+        col_keep = col_counts > max(3, int(0.025 * near_mask.shape[0]))
+        if row_keep.sum().item() < 5 or col_keep.sum().item() < 5:
+            self.depth_box = None
+            return None
+
+        rows = torch.where(row_keep)[0]
+        cols = torch.where(col_keep)[0]
+        bbox_h = int(rows[-1].item() - rows[0].item() + 1)
+        bbox_w = int(cols[-1].item() - cols[0].item() + 1)
+        width_frac = float(bbox_w) / float(max(1, near_mask.shape[1]))
+        height_frac = float(bbox_h) / float(max(1, near_mask.shape[0]))
+        if width_frac < 0.04 or height_frac < 0.06 or width_frac > 0.85 or height_frac > 0.90:
+            self.depth_box = None
+            return None
+
+        xs = xs_roi
         xs = xs.to(torch.float32) + float(col0)
         center_x = xs.mean()
+        center_y = ys_roi.to(torch.float32).mean() + float(row0)
         image_center_x = torch.tensor(float(width - 1) * 0.5, device=self.device)
+        image_center_y = torch.tensor(float(height - 1) * 0.5, device=self.device)
         x_error = ((center_x - image_center_x) / image_center_x).clamp(-1.0, 1.0)
+        y_error = ((center_y - image_center_y) / image_center_y).clamp(-1.0, 1.0)
         distance = roi[near_mask].median()
 
         estimate = {
             "x_error": float(x_error.item()),
+            "y_error": float(y_error.item()),
             "distance": float(distance.item()),
-            "pixels": int(near_mask.sum().item()),
+            "pixels": near_pixels,
+            "area_frac": area_frac,
+            "width_frac": width_frac,
+            "height_frac": height_frac,
         }
         self.depth_box = estimate
         return estimate
@@ -495,7 +564,7 @@ class AlgSolution:
         return abs(estimate["x_error"]) < 0.16 and estimate["distance"] < 3.0
 
     def _depth_corrected_lateral_cmd(self, obs, base_lin_y: float, gain: float = 0.35) -> float:
-        estimate = self._estimate_box_from_depth(obs)
+        estimate = self.depth_box
         if estimate is None:
             return base_lin_y
         # Negative image error means the box appears left; command +Y to move left.
@@ -686,6 +755,7 @@ class AlgSolution:
         action_dim = (int(proprio.shape[-1]) - 12) // 3
         self._update_pose_estimate(proprio)
         self._update_stuck_counter()
+        self._estimate_box_from_depth(obs)
         self._estimate_box_from_lidar(obs)
         self._update_box_pose_model()
 
@@ -731,6 +801,11 @@ class AlgSolution:
             self.rotate_no_progress_ticks = 0
             self.rotate_release_ticks = 0
             self.rotate_pulse_count = 0
+            self.box_est_yaw = 0.0
+            self.box_yaw_confidence = 0.0
+            self.rotate_strategy_index = 0
+            self.rotate_last_confidence = 0.0
+            self.rotate_stagnant_pulses = 0
             self.step = 0
         elif self.phase in ("ROTATE_BOX_RIGHT", "ROTATE_RELEASE_OBSERVE", "ALIGN_BEHIND_ROTATED_BOX", "INSERT_BOX_TO_HOLE") and (
             not self.bridge_ready and self.est_x > self.PIT_GUARD_X
@@ -753,6 +828,7 @@ class AlgSolution:
             self.step = 0
         elif self.phase == "ROTATE_BOX_RIGHT" and self.step >= self.ROTATE_PUSH_PULSE_STEPS:
             self.rotate_pulse_count += 1
+            self._update_rotate_strategy_after_pulse()
             self.phase = "ROTATE_RELEASE_OBSERVE"
             self.step = 0
         elif self.phase == "ROTATE_RELEASE_OBSERVE" and self.step >= self.ROTATE_RELEASE_OBSERVE_STEPS:
@@ -778,6 +854,7 @@ class AlgSolution:
             self.phase = "ROTATE_BOX_RIGHT"
             self.rotate_no_progress_ticks = 0
             self.rotate_release_ticks = 0
+            self.box_yaw_confidence = min(self.box_yaw_confidence, 0.20)
             self.step = 0
         elif self.phase == "INSERT_BOX_TO_HOLE" and (
             self._box_inserted_enough() or self.step >= self.INSERT_BOX_MAX_STEPS
@@ -886,9 +963,10 @@ class AlgSolution:
         return self._compute_base_action(obs, action_dim)
 
     def _rotate_box_right_action(self, obs, action_dim: int) -> torch.Tensor:
-        """Short diagonal push pulse on the box corner."""
+        """Short push pulse using the active rotate primitive."""
         yaw_cmd = float(max(-0.35, min(0.35, -1.6 * self.est_yaw)))
-        if not self._at_rotate_lane():
+        strategy = self._rotate_strategy_name()
+        if strategy in ("LEFT_CORNER_CW", "SIDE_SWEEP") and not self._at_rotate_lane():
             self._set_velocity_command(-0.25, 0.75, yaw_cmd)
             return self._compute_base_action(obs, action_dim)
 
@@ -898,10 +976,24 @@ class AlgSolution:
 
         yaw_error = abs(self.BOX_ROTATE_TARGET_YAW - self.box_est_yaw)
         forward_cmd = float(max(0.40, min(0.62, 0.42 + 0.12 * yaw_error)))
-        side_cmd = -1.0
-        if self.lidar_box is not None:
-            # Keep the box on the front-right corner while rotating it.
-            side_cmd = float(max(-1.0, min(-0.55, -0.80 - 0.15 * self.lidar_box["bearing"])))
+        if strategy == "LEFT_CORNER_CW":
+            side_cmd = -1.0
+            if self.lidar_box is not None:
+                side_cmd = float(max(-1.0, min(-0.55, -0.80 - 0.15 * self.lidar_box["bearing"])))
+        elif strategy == "RIGHT_CORNER_CCW":
+            # Alternate primitive: approach from the lower-Y side and try the
+            # opposite corner if the left-corner contact is not producing yaw.
+            target_y = self.BOX_INSERT_TARGET_Y - 0.35
+            if self.est_y > target_y + 0.20:
+                self._set_velocity_command(-0.20, -0.75, yaw_cmd)
+                return self._compute_base_action(obs, action_dim)
+            forward_cmd = float(max(0.30, min(0.48, 0.34 + 0.08 * yaw_error)))
+            side_cmd = 0.75
+        else:
+            # Side sweep: shallow push across the face to move contact toward a
+            # corner before going back to a corner primitive.
+            forward_cmd = 0.28
+            side_cmd = -0.55 if self.est_y >= self.BOX_INSERT_TARGET_Y else 0.55
         self._set_velocity_command(forward_cmd, side_cmd, yaw_cmd)
         base_action = self._compute_base_action(obs, action_dim)
         return torch.clamp(base_action, -1.0, 1.0)
@@ -909,7 +1001,8 @@ class AlgSolution:
     def _rotate_release_observe_action(self, obs, action_dim: int) -> torch.Tensor:
         """Release contact after a rotate pulse so LiDAR can re-observe the box."""
         yaw_cmd = float(max(-0.35, min(0.35, -1.5 * self.est_yaw)))
-        target_y = min(self.BOX_LEFT_SIDE_Y, self.BOX_EST_Y_MAX)
+        strategy = self._rotate_strategy_name()
+        target_y = self.BOX_INSERT_TARGET_Y - 0.35 if strategy == "RIGHT_CORNER_CCW" else min(self.BOX_LEFT_SIDE_Y, self.BOX_EST_Y_MAX)
         y_error = target_y - self.est_y
         lin_y = float(max(-0.35, min(0.25, 0.7 * y_error)))
         self._set_velocity_command(-0.38, lin_y, yaw_cmd)
