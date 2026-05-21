@@ -88,6 +88,9 @@ class AlgSolution:
         self.ROTATE_RIGHT_TARGET_Y = 1.62
         self.ROTATE_BOX_MIN_STEPS = 260
         self.ROTATE_BOX_MAX_STEPS = 520
+        self.ROTATE_PUSH_PULSE_STEPS = 70
+        self.ROTATE_RELEASE_OBSERVE_STEPS = 45
+        self.MAX_ROTATE_PULSES = 8
         self.SIDE_FORWARD_TARGET_X = -0.85
         self.INSERT_BOX_TARGET_Y = self.BOX_INSERT_TARGET_Y
         self.INSERT_BOX_MIN_STEPS = 220
@@ -120,6 +123,7 @@ class AlgSolution:
         self.lidar_width_delta = 0.0
         self.rotate_no_progress_ticks = 0
         self.rotate_release_ticks = 0
+        self.rotate_pulse_count = 0
         self._printed_lidar_shape = False
         self.LIDAR_CONTROL_SIGN = 1.0
         self._last_logged_phase = None
@@ -283,6 +287,7 @@ class AlgSolution:
                 f"pose=({self.est_x:+.2f}, {self.est_y:+.2f}, {self.est_yaw:+.2f}) "
                 f"box_est=({self.box_est_x:+.2f}, {self.box_est_y:+.2f}, {self.box_est_yaw:+.2f}) "
                 f"bridge_ready={self.bridge_ready} insert_attempts={self.insert_attempts} "
+                f"rotate_pulses={self.rotate_pulse_count} "
                 f"depth_box={self.depth_box} lidar_box={self.lidar_box}"
             )
             self._last_logged_phase = self.phase
@@ -377,7 +382,11 @@ class AlgSolution:
 
     def _box_rotation_ready(self) -> bool:
         yaw_ready = self.box_est_yaw <= self.BOX_ROTATE_TARGET_YAW + 0.10
-        return self.step >= self.ROTATE_BOX_MIN_STEPS and yaw_ready
+        return self._rotate_elapsed_steps() >= self.ROTATE_BOX_MIN_STEPS and yaw_ready
+
+    def _rotate_elapsed_steps(self) -> int:
+        current_pulse_steps = self.step if self.phase == "ROTATE_BOX_RIGHT" else 0
+        return self.rotate_pulse_count * self.ROTATE_PUSH_PULSE_STEPS + current_pulse_steps
 
     def _box_rotation_progress_seen(self) -> bool:
         return self._lidar_rotation_progress() > 0.002 or self.box_est_yaw <= -0.80
@@ -710,8 +719,9 @@ class AlgSolution:
             self.phase = "ROTATE_BOX_RIGHT"
             self.rotate_no_progress_ticks = 0
             self.rotate_release_ticks = 0
+            self.rotate_pulse_count = 0
             self.step = 0
-        elif self.phase in ("ROTATE_BOX_RIGHT", "ALIGN_BEHIND_ROTATED_BOX", "INSERT_BOX_TO_HOLE") and (
+        elif self.phase in ("ROTATE_BOX_RIGHT", "ROTATE_RELEASE_OBSERVE", "ALIGN_BEHIND_ROTATED_BOX", "INSERT_BOX_TO_HOLE") and (
             not self.bridge_ready and self.est_x > self.PIT_GUARD_X
         ):
             self.phase = "RETREAT_FROM_PIT"
@@ -722,14 +732,21 @@ class AlgSolution:
         elif self.phase == "ROTATE_BOX_RIGHT" and self._box_rotation_ready():
             self.phase = "ALIGN_BEHIND_ROTATED_BOX"
             self.step = 0
-        elif self.phase == "ROTATE_BOX_RIGHT" and self.step >= self.ROTATE_BOX_MAX_STEPS:
-            if self._box_rotation_progress_seen():
-                self.ROTATE_BOX_MAX_STEPS += 240
-            else:
+        elif self.phase == "ROTATE_BOX_RIGHT" and self.step >= self.ROTATE_PUSH_PULSE_STEPS:
+            self.rotate_pulse_count += 1
+            self.phase = "ROTATE_RELEASE_OBSERVE"
+            self.step = 0
+        elif self.phase == "ROTATE_RELEASE_OBSERVE" and self.step >= self.ROTATE_RELEASE_OBSERVE_STEPS:
+            if self._box_rotation_ready():
+                self.phase = "ALIGN_BEHIND_ROTATED_BOX"
+            elif self.rotate_pulse_count >= self.MAX_ROTATE_PULSES:
                 self.phase = "MOVE_FORWARD_BESIDE_BOX"
-                self.rotate_no_progress_ticks = 0
-                self.rotate_release_ticks = 0
-                self.step = 0
+                self.rotate_pulse_count = 0
+            else:
+                self.phase = "ROTATE_BOX_RIGHT"
+            self.rotate_no_progress_ticks = 0
+            self.rotate_release_ticks = 0
+            self.step = 0
         elif self.phase == "ALIGN_BEHIND_ROTATED_BOX" and (
             (self._behind_rotated_box_ready() and self._box_rotation_ready())
             or self.step >= self.ALIGN_BEHIND_BOX_MAX_STEPS
@@ -779,6 +796,8 @@ class AlgSolution:
             action = self._move_forward_beside_box_action(obs, action_dim)
         elif self.phase == "ROTATE_BOX_RIGHT":
             action = self._rotate_box_right_action(obs, action_dim)
+        elif self.phase == "ROTATE_RELEASE_OBSERVE":
+            action = self._rotate_release_observe_action(obs, action_dim)
         elif self.phase == "RETREAT_FROM_PIT":
             action = self._retreat_from_pit_action(obs, action_dim)
         elif self.phase == "ALIGN_BEHIND_ROTATED_BOX":
@@ -848,26 +867,12 @@ class AlgSolution:
         return self._compute_base_action(obs, action_dim)
 
     def _rotate_box_right_action(self, obs, action_dim: int) -> torch.Tensor:
-        """Push the box corner diagonally so the box rotates before insertion."""
+        """Short diagonal push pulse on the box corner."""
         yaw_cmd = float(max(-0.35, min(0.35, -1.6 * self.est_yaw)))
         if not self.bridge_ready and self.est_x > self.PIT_GUARD_X:
             self._set_velocity_command(-0.45, 0.15, yaw_cmd)
             return self._compute_base_action(obs, action_dim)
 
-        if self._rotation_contact_stalled():
-            self.rotate_release_ticks += 1
-            # We are likely pushing a face/wall instead of the corner. Release
-            # contact, move slightly back-left, then the normal command will
-            # re-approach the corner with a better contact point.
-            if self.rotate_release_ticks < 45:
-                self._set_velocity_command(-0.35, 0.35, yaw_cmd)
-            else:
-                self.rotate_no_progress_ticks = 0
-                self.rotate_release_ticks = 0
-                self._set_velocity_command(0.35, -0.75, yaw_cmd)
-            return self._compute_base_action(obs, action_dim)
-
-        self.rotate_release_ticks = 0
         yaw_error = abs(self.BOX_ROTATE_TARGET_YAW - self.box_est_yaw)
         forward_cmd = float(max(0.40, min(0.62, 0.42 + 0.12 * yaw_error)))
         side_cmd = -1.0
@@ -877,6 +882,15 @@ class AlgSolution:
         self._set_velocity_command(forward_cmd, side_cmd, yaw_cmd)
         base_action = self._compute_base_action(obs, action_dim)
         return torch.clamp(base_action, -1.0, 1.0)
+
+    def _rotate_release_observe_action(self, obs, action_dim: int) -> torch.Tensor:
+        """Release contact after a rotate pulse so LiDAR can re-observe the box."""
+        yaw_cmd = float(max(-0.35, min(0.35, -1.5 * self.est_yaw)))
+        target_y = min(self.BOX_LEFT_SIDE_Y, self.BOX_EST_Y_MAX)
+        y_error = target_y - self.est_y
+        lin_y = float(max(-0.35, min(0.25, 0.7 * y_error)))
+        self._set_velocity_command(-0.38, lin_y, yaw_cmd)
+        return self._compute_base_action(obs, action_dim)
 
     def _retreat_from_pit_action(self, obs, action_dim: int) -> torch.Tensor:
         """Move back to a safe x before attempting more box manipulation."""
