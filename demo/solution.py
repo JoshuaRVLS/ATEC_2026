@@ -96,9 +96,9 @@ class AlgSolution:
         self.ALIGN_BEHIND_BOX_MAX_STEPS = 300
         self.POST_INSERT_BACKUP_STEPS = 90
         self.POST_INSERT_BACKUP_MAX_STEPS = 240
-        self.PIT_GUARD_X = -1.15
-        self.PIT_RETREAT_X = -1.35
-        self.INSERT_MAX_ROBOT_X = -1.15
+        self.PIT_GUARD_X = -0.92
+        self.PIT_RETREAT_X = -1.22
+        self.INSERT_MAX_ROBOT_X = -1.02
         self.RELEASE_SAFE_X = -1.25
         self.stuck_ticks = 0
         self.prev_est_x = self.est_x
@@ -839,7 +839,9 @@ class AlgSolution:
         """Move forward on the left side until reaching an off-center rotate point."""
         y_error = self.BOX_LEFT_SIDE_Y - self.est_y
         x_error = (self.box_est_x + 0.18) - self.est_x
-        lin_y = float(max(-0.15, min(0.35, 0.9 * y_error)))
+        lin_y = float(max(-0.35, min(0.35, 0.9 * y_error)))
+        if self.est_y > self.BOX_LEFT_SIDE_Y + 0.18:
+            lin_y = min(lin_y, -0.35)
         lin_x = float(max(0.35, min(0.90, 0.65 + 0.45 * x_error)))
         yaw_cmd = float(max(-0.30, min(0.30, -1.2 * self.est_yaw)))
         self._set_velocity_command(lin_x, lin_y, yaw_cmd)
@@ -879,7 +881,10 @@ class AlgSolution:
     def _retreat_from_pit_action(self, obs, action_dim: int) -> torch.Tensor:
         """Move back to a safe x before attempting more box manipulation."""
         yaw_cmd = float(max(-0.35, min(0.35, -1.5 * self.est_yaw)))
-        self._set_velocity_command(-0.65, 0.20, yaw_cmd)
+        target_y = min(self.BOX_LEFT_SIDE_Y, self.BOX_EST_Y_MAX)
+        y_error = target_y - self.est_y
+        lin_y = float(max(-0.45, min(0.25, 0.8 * y_error)))
+        self._set_velocity_command(-0.65, lin_y, yaw_cmd)
         return self._compute_base_action(obs, action_dim)
 
     def _insert_box_to_hole_action(self, obs, action_dim: int) -> torch.Tensor:
