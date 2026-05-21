@@ -113,8 +113,12 @@ class AlgSolution:
         self.lidar_box = None
         self.prev_lidar_bearing = None
         self.prev_lidar_range = None
+        self.prev_lidar_angular_width = None
         self.lidar_bearing_delta = 0.0
         self.lidar_range_delta = 0.0
+        self.lidar_width_delta = 0.0
+        self.rotate_no_progress_ticks = 0
+        self.rotate_release_ticks = 0
         self._printed_lidar_shape = False
         self.LIDAR_CONTROL_SIGN = 1.0
         self._last_logged_phase = None
@@ -344,9 +348,20 @@ class AlgSolution:
             self.box_est_y = 0.96 * self.box_est_y + 0.04 * (self.est_y - 0.85)
 
         elif self.phase == "ROTATE_BOX_RIGHT":
-            lidar_progress = max(0.0, -self.lidar_bearing_delta)
-            yaw_step = 0.0035 + min(0.030, 0.80 * lidar_progress)
-            self.box_est_yaw = max(self.BOX_ROTATE_TARGET_YAW, self.box_est_yaw - yaw_step)
+            yaw_before = self.box_est_yaw
+            sensor_rotation = self._lidar_rotation_progress()
+            if sensor_rotation > 0.002:
+                yaw_step = min(0.030, 0.004 + sensor_rotation)
+                self.box_est_yaw = max(self.BOX_ROTATE_TARGET_YAW, self.box_est_yaw - yaw_step)
+            elif self.step > 80:
+                # Very small model drift so we don't wait forever on noisy LiDAR,
+                # but this is intentionally much weaker than sensor-confirmed progress.
+                self.box_est_yaw = max(self.BOX_ROTATE_TARGET_YAW, self.box_est_yaw - 0.001)
+
+            if abs(self.box_est_yaw - yaw_before) < 0.0015:
+                self.rotate_no_progress_ticks += 1
+            else:
+                self.rotate_no_progress_ticks = 0
 
         elif self.phase == "INSERT_BOX_TO_HOLE":
             y_error = self.box_est_y - self.BOX_INSERT_TARGET_Y
@@ -360,9 +375,23 @@ class AlgSolution:
         return self.box_est_x >= self.BOX_PRE_ROTATE_TARGET_X or self.est_x >= self.SIDE_PUSH_START_X
 
     def _box_rotation_ready(self) -> bool:
-        lidar_ready = self._box_seen_on_right_side()
         yaw_ready = self.box_est_yaw <= self.BOX_ROTATE_TARGET_YAW + 0.10
-        return self.step >= self.ROTATE_BOX_MIN_STEPS and (yaw_ready or lidar_ready)
+        return self.step >= self.ROTATE_BOX_MIN_STEPS and yaw_ready
+
+    def _box_rotation_progress_seen(self) -> bool:
+        return self._lidar_rotation_progress() > 0.002 or self.box_est_yaw <= -0.80
+
+    def _lidar_rotation_progress(self) -> float:
+        """Sensor cue that the box is rotating under diagonal contact."""
+        if self.lidar_box is None:
+            return 0.0
+        bearing_cue = max(0.0, -self.lidar_bearing_delta)
+        width_cue = max(0.0, self.lidar_width_delta)
+        range_cue = max(0.0, -self.lidar_range_delta)
+        return 0.85 * bearing_cue + 0.20 * width_cue + 0.04 * range_cue
+
+    def _rotation_contact_stalled(self) -> bool:
+        return self.phase == "ROTATE_BOX_RIGHT" and self.rotate_no_progress_ticks > 85
 
     def _box_inserted_enough(self) -> bool:
         pose_ready = abs(self.box_est_y - self.BOX_INSERT_TARGET_Y) <= self.BOX_INSERT_Y_TOL
@@ -612,8 +641,12 @@ class AlgSolution:
         if self.prev_lidar_range is not None:
             range_delta = range_proxy - self.prev_lidar_range
             self.lidar_range_delta = 0.85 * self.lidar_range_delta + 0.15 * range_delta
+        if self.prev_lidar_angular_width is not None:
+            width_delta = angular_width - self.prev_lidar_angular_width
+            self.lidar_width_delta = 0.85 * self.lidar_width_delta + 0.15 * width_delta
         self.prev_lidar_bearing = bearing
         self.prev_lidar_range = range_proxy
+        self.prev_lidar_angular_width = angular_width
         self.lidar_box = estimate
         return estimate
 
@@ -674,16 +707,32 @@ class AlgSolution:
             self.est_x >= self.ROTATE_CORNER_X - 0.08 or self.step >= 360
         ):
             self.phase = "ROTATE_BOX_RIGHT"
+            self.rotate_no_progress_ticks = 0
+            self.rotate_release_ticks = 0
             self.step = 0
-        elif self.phase == "ROTATE_BOX_RIGHT" and (
-            self._box_rotation_ready() or self.step >= self.ROTATE_BOX_MAX_STEPS
-        ):
+        elif self.phase == "ROTATE_BOX_RIGHT" and self._box_rotation_ready():
             self.phase = "ALIGN_BEHIND_ROTATED_BOX"
             self.step = 0
+        elif self.phase == "ROTATE_BOX_RIGHT" and self.step >= self.ROTATE_BOX_MAX_STEPS:
+            if self._box_rotation_progress_seen():
+                self.ROTATE_BOX_MAX_STEPS += 240
+            else:
+                self.phase = "MOVE_FORWARD_BESIDE_BOX"
+                self.rotate_no_progress_ticks = 0
+                self.rotate_release_ticks = 0
+                self.step = 0
         elif self.phase == "ALIGN_BEHIND_ROTATED_BOX" and (
-            self._behind_rotated_box_ready() or self.step >= self.ALIGN_BEHIND_BOX_MAX_STEPS
+            (self._behind_rotated_box_ready() and self._box_rotation_ready())
+            or self.step >= self.ALIGN_BEHIND_BOX_MAX_STEPS
         ):
-            self.phase = "INSERT_BOX_TO_HOLE"
+            self.phase = "INSERT_BOX_TO_HOLE" if self._box_rotation_ready() else "ROTATE_BOX_RIGHT"
+            self.rotate_no_progress_ticks = 0
+            self.rotate_release_ticks = 0
+            self.step = 0
+        elif self.phase == "INSERT_BOX_TO_HOLE" and not self._box_rotation_ready():
+            self.phase = "ROTATE_BOX_RIGHT"
+            self.rotate_no_progress_ticks = 0
+            self.rotate_release_ticks = 0
             self.step = 0
         elif self.phase == "INSERT_BOX_TO_HOLE" and (
             self._box_inserted_enough() or self.step >= self.INSERT_BOX_MAX_STEPS
@@ -788,6 +837,20 @@ class AlgSolution:
     def _rotate_box_right_action(self, obs, action_dim: int) -> torch.Tensor:
         """Push the box corner diagonally so the box rotates before insertion."""
         yaw_cmd = float(max(-0.35, min(0.35, -1.6 * self.est_yaw)))
+        if self._rotation_contact_stalled():
+            self.rotate_release_ticks += 1
+            # We are likely pushing a face/wall instead of the corner. Release
+            # contact, move slightly back-left, then the normal command will
+            # re-approach the corner with a better contact point.
+            if self.rotate_release_ticks < 45:
+                self._set_velocity_command(-0.35, 0.35, yaw_cmd)
+            else:
+                self.rotate_no_progress_ticks = 0
+                self.rotate_release_ticks = 0
+                self._set_velocity_command(0.35, -0.75, yaw_cmd)
+            return self._compute_base_action(obs, action_dim)
+
+        self.rotate_release_ticks = 0
         yaw_error = abs(self.BOX_ROTATE_TARGET_YAW - self.box_est_yaw)
         forward_cmd = float(max(0.40, min(0.62, 0.42 + 0.12 * yaw_error)))
         side_cmd = -1.0
