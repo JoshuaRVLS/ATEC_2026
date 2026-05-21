@@ -43,6 +43,7 @@ parser.add_argument("--randomize_goal", action="store_true", default=False)
 parser.add_argument("--target_x_range", type=float, nargs=2, default=(-0.70, 0.20))
 parser.add_argument("--target_y_range", type=float, nargs=2, default=(0.90, 1.50))
 parser.add_argument("--target_yaw_range", type=float, nargs=2, default=(1.20, 1.90))
+parser.add_argument("--command_scale", type=float, nargs=3, default=(0.45, 0.45, 0.25))
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
 args_cli.enable_cameras = True
@@ -171,8 +172,8 @@ class ActorCritic(nn.Module):
             nn.ELU(),
             nn.Linear(hidden_dim, 1),
         )
-        self.log_std = nn.Parameter(torch.zeros(action_dim))
-        self.register_buffer("command_scale", torch.tensor([1.0, 1.0, 0.8], dtype=torch.float32))
+        self.log_std = nn.Parameter(torch.full((action_dim,), -0.7))
+        self.register_buffer("command_scale", torch.tensor(args_cli.command_scale, dtype=torch.float32))
 
     def distribution(self, obs: torch.Tensor) -> torch.distributions.Normal:
         mean = torch.tanh(self.actor(obs))
@@ -289,6 +290,7 @@ def shaped_reward(
     robot_x = robot_pos[:, 0]
     robot_y = robot_pos[:, 1]
     robot_z = robot_pos[:, 2]
+    upright_z = env.unwrapped.scene["robot"].data.projected_gravity_b[:, 2]
     robot_box_dist = torch.linalg.norm(robot_pos[:, :2] - box_pos[:, :2], dim=-1)
 
     prev_goal_dist = torch.linalg.norm(prev_box_pos[:, :2] - target_xy, dim=-1)
@@ -306,6 +308,9 @@ def shaped_reward(
     robot_progress = torch.clamp(robot_pos[:, 0] + 3.0, min=0.0, max=6.0)
     action_penalty = torch.sum(actions * actions, dim=-1)
     fall_penalty = (robot_z < 0.35).to(torch.float32)
+    low_height_penalty = torch.clamp(0.55 - robot_z, min=0.0, max=0.55)
+    upside_down_penalty = (upright_z > 0.0).to(torch.float32)
+    tilt_penalty = torch.clamp(upright_z + 0.6, min=0.0, max=1.6)
     pit_danger = (
         (robot_x > -1.45)
         & (robot_x < 0.75)
@@ -328,11 +333,14 @@ def shaped_reward(
         + 1.5 * near_success_bonus
         + 5.0 * success_bonus
         + 0.02 * robot_progress
-        - 0.002 * action_penalty
-        - 0.01 * yaw_spin_penalty
+        - 0.010 * action_penalty
+        - 0.05 * yaw_spin_penalty
         - 1.5 * far_penalty
         - 4.0 * pit_danger
-        - 8.0 * fall_penalty
+        - 2.0 * low_height_penalty
+        - 3.0 * tilt_penalty
+        - 4.0 * upside_down_penalty
+        - 6.0 * fall_penalty
         + 0.02
     )
 
