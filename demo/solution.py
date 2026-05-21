@@ -310,7 +310,7 @@ class AlgSolution:
         assumptions with LiDAR bearing changes so phase decisions can target the
         box pose instead of relying only on fixed step counts.
         """
-        if self.lidar_box is not None:
+        if self.lidar_box is not None and self.lidar_box["range"] <= 3.2 and self.lidar_box["count"] >= 8:
             bearing_world = self.est_yaw + self.lidar_box["bearing"]
             range_proxy = self.lidar_box.get("range", 1.2)
             lidar_x = self.est_x + math.cos(bearing_world) * range_proxy
@@ -333,7 +333,6 @@ class AlgSolution:
             lidar_progress = max(0.0, -self.lidar_bearing_delta)
             yaw_step = 0.0035 + min(0.030, 0.80 * lidar_progress)
             self.box_est_yaw = max(self.BOX_ROTATE_TARGET_YAW, self.box_est_yaw - yaw_step)
-            self.box_est_y = max(self.BOX_INSERT_TARGET_Y, self.box_est_y - 0.0025)
 
         elif self.phase == "INSERT_BOX_TO_HOLE":
             self.box_est_y = max(self.BOX_INSERT_TARGET_Y - 0.10, self.box_est_y - 0.0045)
@@ -547,28 +546,31 @@ class AlgSolution:
         for start, end in clusters:
             raw_idx = torch.arange(start, end + 1, device=self.device) % num_bins
             width = raw_idx.numel()
-            if width < 3 or width > int(0.40 * num_bins):
+            angular_width = float(width) * (2.0 * math.pi / float(num_bins))
+            range_proxy = float(max(0.45, min(5.0, 0.85 / max(angular_width, 0.08))))
+            if width < 8 or width > int(0.30 * num_bins):
+                continue
+            if angular_width < 0.12 or range_proxy > 3.2:
                 continue
             weights_i = deviation[raw_idx].clamp_min(1e-4)
             strength = float(weights_i.mean().item())
             center_penalty = abs(((start + end) * 0.5 / float(num_bins - 1)) * (2.0 * math.pi) - math.pi)
-            score = strength * math.sqrt(float(width)) / (1.0 + 0.15 * center_penalty)
+            range_penalty = abs(range_proxy - 1.2)
+            score = strength * math.sqrt(float(width)) / (1.0 + 0.15 * center_penalty + 0.35 * range_penalty)
             if score > best_score:
                 best_score = score
-                best = (raw_idx, width, strength)
+                best = (raw_idx, width, strength, angular_width, range_proxy)
 
         if best is None:
             self.lidar_box = None
             return None
 
-        idx, width, strength = best
+        idx, width, strength, angular_width, range_proxy = best
         weights = deviation[idx].clamp_min(1e-4)
         angles = (idx.to(torch.float32) / float(num_bins - 1)) * (2.0 * math.pi) - math.pi
         sin_mean = torch.sum(weights * torch.sin(angles)) / torch.sum(weights)
         cos_mean = torch.sum(weights * torch.cos(angles)) / torch.sum(weights)
         bearing = math.atan2(float(sin_mean.item()), float(cos_mean.item()))
-        angular_width = float(width) * (2.0 * math.pi / float(num_bins))
-        range_proxy = float(max(0.45, min(5.0, 0.85 / max(angular_width, 0.08))))
 
         estimate = {
             "bearing": bearing,
