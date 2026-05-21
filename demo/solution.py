@@ -74,6 +74,9 @@ class AlgSolution:
         self.BOX_LANE_Y = 1.55
         self.CONTACT_TARGET_X = -3.08
         self.SIDE_PUSH_START_X = -1.25
+        self.BOX_PRE_ROTATE_TARGET_X = -1.18
+        self.BOX_INSERT_TARGET_Y = 0.92
+        self.BOX_ROTATE_TARGET_YAW = -1.35
         self.DETACH_BACKUP_DISTANCE = 0.45
         self.detach_start_x = None
         self.contact_ticks = 0
@@ -87,13 +90,21 @@ class AlgSolution:
         self.INSERT_BOX_MIN_STEPS = 220
         self.INSERT_BOX_MAX_STEPS = 620
         self.POST_INSERT_BACKUP_STEPS = 90
+        self.PIT_GUARD_X = -0.82
         self.stuck_ticks = 0
         self.prev_est_x = self.est_x
         self.prev_est_y = self.est_y
+        self.box_est_x = -3.0
+        self.box_est_y = 1.6
+        self.box_est_yaw = 0.0
+        self.bridge_ready = False
+        self.current_score = 0.0
         self.depth_box = None
         self.lidar_box = None
         self.prev_lidar_bearing = None
+        self.prev_lidar_range = None
         self.lidar_bearing_delta = 0.0
+        self.lidar_range_delta = 0.0
         self._printed_lidar_shape = False
         self.LIDAR_CONTROL_SIGN = 1.0
         self._last_logged_phase = None
@@ -240,6 +251,8 @@ class AlgSolution:
         return self._map_policy_action_to_env_action(action_train, action_dim)
 
     def _set_velocity_command(self, lin_x: float, lin_y: float, ang_z: float) -> None:
+        if not self.bridge_ready and self.phase != "INSERT_BOX_TO_HOLE" and self.est_x > self.PIT_GUARD_X:
+            lin_x = min(lin_x, 0.10)
         self.fixed_velocity_commands = torch.tensor(
             [lin_x, lin_y, ang_z], device=self.device, dtype=torch.float32
         ).view(1, 3)
@@ -251,6 +264,8 @@ class AlgSolution:
                 f"[TaskD] phase={self.phase} step={self.step} "
                 f"cmd=({cmd[0]:+.2f}, {cmd[1]:+.2f}, {cmd[2]:+.2f}) "
                 f"pose=({self.est_x:+.2f}, {self.est_y:+.2f}, {self.est_yaw:+.2f}) "
+                f"box_est=({self.box_est_x:+.2f}, {self.box_est_y:+.2f}, {self.box_est_yaw:+.2f}) "
+                f"bridge_ready={self.bridge_ready} "
                 f"depth_box={self.depth_box} lidar_box={self.lidar_box}"
             )
             self._last_logged_phase = self.phase
@@ -287,6 +302,58 @@ class AlgSolution:
             self.contact_ticks = 0
         self.prev_est_x = self.est_x
         self.prev_est_y = self.est_y
+
+    def _update_box_pose_model(self) -> None:
+        """Maintain a coarse box pose estimate for target-based manipulation.
+
+        We do not get ground-truth box pose in obs. This estimate combines contact
+        assumptions with LiDAR bearing changes so phase decisions can target the
+        box pose instead of relying only on fixed step counts.
+        """
+        if self.lidar_box is not None:
+            bearing_world = self.est_yaw + self.lidar_box["bearing"]
+            range_proxy = self.lidar_box.get("range", 1.2)
+            lidar_x = self.est_x + math.cos(bearing_world) * range_proxy
+            lidar_y = self.est_y + math.sin(bearing_world) * range_proxy
+            # The range is approximate, so blend it slowly instead of trusting it
+            # as ground truth. Bearing is the valuable part of this observation.
+            self.box_est_x = 0.88 * self.box_est_x + 0.12 * lidar_x
+            self.box_est_y = 0.82 * self.box_est_y + 0.18 * lidar_y
+
+        if self.phase in ("CONTACT_BOX", "PUSH_BOX"):
+            observed_x = self.est_x + 0.72
+            observed_y = self.est_y
+            self.box_est_x = max(self.box_est_x, min(observed_x, self.BOX_PRE_ROTATE_TARGET_X + 0.18))
+            self.box_est_y = 0.92 * self.box_est_y + 0.08 * observed_y
+
+        elif self.phase == "MOVE_FORWARD_BESIDE_BOX":
+            self.box_est_y = 0.96 * self.box_est_y + 0.04 * (self.est_y - 0.85)
+
+        elif self.phase == "ROTATE_BOX_RIGHT":
+            lidar_progress = max(0.0, -self.lidar_bearing_delta)
+            yaw_step = 0.0035 + min(0.030, 0.80 * lidar_progress)
+            self.box_est_yaw = max(self.BOX_ROTATE_TARGET_YAW, self.box_est_yaw - yaw_step)
+            self.box_est_y = max(self.BOX_INSERT_TARGET_Y, self.box_est_y - 0.0025)
+
+        elif self.phase == "INSERT_BOX_TO_HOLE":
+            self.box_est_y = max(self.BOX_INSERT_TARGET_Y - 0.10, self.box_est_y - 0.0045)
+
+        if self.current_score >= 14.0:
+            self.bridge_ready = True
+
+    def _box_x_ready_for_rotation(self) -> bool:
+        return self.box_est_x >= self.BOX_PRE_ROTATE_TARGET_X or self.est_x >= self.SIDE_PUSH_START_X
+
+    def _box_rotation_ready(self) -> bool:
+        lidar_ready = self._box_seen_on_right_side()
+        yaw_ready = self.box_est_yaw <= self.BOX_ROTATE_TARGET_YAW + 0.10
+        return self.step >= self.ROTATE_BOX_MIN_STEPS and (yaw_ready or lidar_ready)
+
+    def _box_inserted_enough(self) -> bool:
+        score_ready = self.current_score >= 14.0
+        pose_ready = self.box_est_y <= self.BOX_INSERT_TARGET_Y + 0.06
+        sensor_ready = self._box_is_not_centered_front()
+        return score_ready or (self.step >= self.INSERT_BOX_MIN_STEPS and pose_ready and sensor_ready)
 
     def _get_image_tensor(self, obs, *names):
         image_obs = obs.get("image", {}) if isinstance(obs, dict) else {}
@@ -383,24 +450,15 @@ class AlgSolution:
             scan = scan.reshape(scan.shape[0], -1)
         return scan
 
-    def _estimate_box_from_lidar(self, obs):
-        """Estimate box bearing from LiDAR height/range outliers.
-
-        Task D's LiDAR is a flattened extero observation. The exact flattening can
-        differ across IsaacLab versions, so this keeps the estimator conservative:
-        reshape by 360 horizontal bins when possible, detect columns that look
-        different from the floor, then report their circular center angle.
-        """
+    def _extract_lidar_horizontal_profile(self, obs):
         scan = self._get_lidar_scan(obs)
         if scan is None or scan.numel() == 0:
-            self.lidar_box = None
             return None
 
         flat = scan[0].flatten()
         finite = torch.isfinite(flat)
         valid = flat[finite]
         if valid.numel() < 32:
-            self.lidar_box = None
             return None
 
         if not self._printed_lidar_shape:
@@ -424,6 +482,43 @@ class AlgSolution:
         else:
             horizontal = flat
 
+        return horizontal
+
+    def _find_lidar_clusters(self, mask: torch.Tensor) -> list[tuple[int, int]]:
+        """Find contiguous angular clusters in a 1D circular LiDAR mask."""
+        indices = torch.where(mask)[0].detach().cpu().tolist()
+        if not indices:
+            return []
+
+        clusters = []
+        start = prev = indices[0]
+        for idx in indices[1:]:
+            if idx == prev + 1:
+                prev = idx
+            else:
+                clusters.append((start, prev))
+                start = prev = idx
+        clusters.append((start, prev))
+
+        # Merge wrap-around cluster touching both ends of the circular scan.
+        if len(clusters) > 1 and clusters[0][0] == 0 and clusters[-1][1] == mask.numel() - 1:
+            first = clusters.pop(0)
+            last = clusters.pop(-1)
+            clusters.insert(0, (last[0], first[1] + mask.numel()))
+        return clusters
+
+    def _estimate_box_from_lidar(self, obs):
+        """Estimate box bearing/range from clustered LiDAR outliers.
+
+        This is not full SLAM. It converts the flattened height scan into a circular
+        angular profile, clusters non-floor returns, and treats the most plausible
+        mid-size cluster as the box.
+        """
+        horizontal = self._extract_lidar_horizontal_profile(obs)
+        if horizontal is None:
+            self.lidar_box = None
+            return None
+
         finite_h = torch.isfinite(horizontal)
         values = horizontal[finite_h]
         if values.numel() < 32:
@@ -441,18 +536,46 @@ class AlgSolution:
             self.lidar_box = None
             return None
 
-        idx = torch.where(mask)[0].to(torch.float32)
-        weights = deviation[mask].clamp_min(1e-4)
         num_bins = max(2, horizontal.numel())
-        angles = (idx / float(num_bins - 1)) * (2.0 * math.pi) - math.pi
+        clusters = self._find_lidar_clusters(mask)
+        if not clusters:
+            self.lidar_box = None
+            return None
+
+        best = None
+        best_score = -1.0
+        for start, end in clusters:
+            raw_idx = torch.arange(start, end + 1, device=self.device) % num_bins
+            width = raw_idx.numel()
+            if width < 3 or width > int(0.40 * num_bins):
+                continue
+            weights_i = deviation[raw_idx].clamp_min(1e-4)
+            strength = float(weights_i.mean().item())
+            center_penalty = abs(((start + end) * 0.5 / float(num_bins - 1)) * (2.0 * math.pi) - math.pi)
+            score = strength * math.sqrt(float(width)) / (1.0 + 0.15 * center_penalty)
+            if score > best_score:
+                best_score = score
+                best = (raw_idx, width, strength)
+
+        if best is None:
+            self.lidar_box = None
+            return None
+
+        idx, width, strength = best
+        weights = deviation[idx].clamp_min(1e-4)
+        angles = (idx.to(torch.float32) / float(num_bins - 1)) * (2.0 * math.pi) - math.pi
         sin_mean = torch.sum(weights * torch.sin(angles)) / torch.sum(weights)
         cos_mean = torch.sum(weights * torch.cos(angles)) / torch.sum(weights)
         bearing = math.atan2(float(sin_mean.item()), float(cos_mean.item()))
+        angular_width = float(width) * (2.0 * math.pi / float(num_bins))
+        range_proxy = float(max(0.45, min(5.0, 0.85 / max(angular_width, 0.08))))
 
         estimate = {
             "bearing": bearing,
-            "count": int(mask.sum().item()),
-            "strength": float(weights.mean().item()),
+            "range": range_proxy,
+            "angular_width": angular_width,
+            "count": int(width),
+            "strength": strength,
         }
         if self.prev_lidar_bearing is not None:
             delta = bearing - self.prev_lidar_bearing
@@ -461,7 +584,11 @@ class AlgSolution:
             while delta < -math.pi:
                 delta += 2.0 * math.pi
             self.lidar_bearing_delta = 0.85 * self.lidar_bearing_delta + 0.15 * delta
+        if self.prev_lidar_range is not None:
+            range_delta = range_proxy - self.prev_lidar_range
+            self.lidar_range_delta = 0.85 * self.lidar_range_delta + 0.15 * range_delta
         self.prev_lidar_bearing = bearing
+        self.prev_lidar_range = range_proxy
         self.lidar_box = estimate
         return estimate
 
@@ -482,11 +609,13 @@ class AlgSolution:
         # if current_score > 1:
         #     return {'action': [], 'giveup': True}
         
+        self.current_score = float(current_score)
         proprio = obs["proprio"].to(self.device)
         action_dim = (int(proprio.shape[-1]) - 12) // 3
         self._update_pose_estimate(proprio)
         self._update_stuck_counter()
         self._estimate_box_from_lidar(obs)
+        self._update_box_pose_model()
 
         if self.phase == "BACK_UP" and self.est_x <= self.BACK_UP_TARGET_X:
             self.phase = "MOVE_LEFT_TO_BOX_LANE"
@@ -501,9 +630,7 @@ class AlgSolution:
         ):
             self.phase = "PUSH_BOX"
             self.step = 0
-        elif self.phase == "PUSH_BOX" and (
-            self.est_x >= self.SIDE_PUSH_START_X or self.stuck_ticks >= 25
-        ):
+        elif self.phase == "PUSH_BOX" and (self._box_x_ready_for_rotation() or self.stuck_ticks >= 25):
             self.phase = "DETACH_FROM_BOX"
             self.detach_start_x = self.est_x
             self.step = 0
@@ -524,24 +651,14 @@ class AlgSolution:
             self.phase = "ROTATE_BOX_RIGHT"
             self.step = 0
         elif self.phase == "ROTATE_BOX_RIGHT" and (
-            (
-                self.est_y <= self.ROTATE_RIGHT_TARGET_Y
-                and self.step >= self.ROTATE_BOX_MIN_STEPS
-                and self._box_seen_on_right_side()
-            )
-            or self.step >= self.ROTATE_BOX_MAX_STEPS
+            self._box_rotation_ready() or self.step >= self.ROTATE_BOX_MAX_STEPS
         ):
             self.phase = "INSERT_BOX_TO_HOLE"
             self.step = 0
         elif self.phase == "INSERT_BOX_TO_HOLE" and (
-            (
-                self.est_y <= self.INSERT_BOX_TARGET_Y
-                and self.step >= self.INSERT_BOX_MIN_STEPS
-                and self._box_is_not_centered_front()
-            )
-            or self.step >= self.INSERT_BOX_MAX_STEPS
-            or current_score >= 14.0
+            self._box_inserted_enough() or self.step >= self.INSERT_BOX_MAX_STEPS
         ):
+            self.bridge_ready = True
             self.phase = "RELEASE_BOX"
             self.step = 0
         elif self.phase == "RELEASE_BOX" and self.step >= self.POST_INSERT_BACKUP_STEPS:
@@ -619,27 +736,32 @@ class AlgSolution:
     def _move_forward_beside_box_action(self, obs, action_dim: int) -> torch.Tensor:
         """Move forward on the left side until reaching an off-center rotate point."""
         y_error = self.BOX_LEFT_SIDE_Y - self.est_y
+        x_error = (self.box_est_x + 0.18) - self.est_x
         lin_y = float(max(-0.15, min(0.35, 0.9 * y_error)))
+        lin_x = float(max(0.35, min(0.90, 0.65 + 0.45 * x_error)))
         yaw_cmd = float(max(-0.30, min(0.30, -1.2 * self.est_yaw)))
-        self._set_velocity_command(0.90, lin_y, yaw_cmd)
+        self._set_velocity_command(lin_x, lin_y, yaw_cmd)
         return self._compute_base_action(obs, action_dim)
 
     def _rotate_box_right_action(self, obs, action_dim: int) -> torch.Tensor:
         """Push the box corner diagonally so the box rotates before insertion."""
         yaw_cmd = float(max(-0.35, min(0.35, -1.6 * self.est_yaw)))
+        yaw_error = abs(self.BOX_ROTATE_TARGET_YAW - self.box_est_yaw)
+        forward_cmd = float(max(0.40, min(0.62, 0.42 + 0.12 * yaw_error)))
         side_cmd = -1.0
         if self.lidar_box is not None:
             # Keep the box on the front-right corner while rotating it.
             side_cmd = float(max(-1.0, min(-0.55, -0.80 - 0.15 * self.lidar_box["bearing"])))
-        self._set_velocity_command(0.55, side_cmd, yaw_cmd)
+        self._set_velocity_command(forward_cmd, side_cmd, yaw_cmd)
         base_action = self._compute_base_action(obs, action_dim)
         return torch.clamp(base_action, -1.0, 1.0)
 
     def _insert_box_to_hole_action(self, obs, action_dim: int) -> torch.Tensor:
         """After rotation, push the box toward the pit/hole lane."""
         yaw_cmd = float(max(-0.35, min(0.35, -1.6 * self.est_yaw)))
+        y_error = max(0.0, self.box_est_y - self.BOX_INSERT_TARGET_Y)
         forward_cmd = 0.08
-        side_cmd = -1.0
+        side_cmd = float(max(-1.0, min(-0.55, -0.62 - 0.55 * y_error)))
         if self.lidar_box is not None:
             # If the box drifts too far front/left in LiDAR, add a little +X pressure.
             forward_cmd = float(max(0.04, min(0.22, 0.08 + 0.06 * abs(self.lidar_box["bearing"]))))
