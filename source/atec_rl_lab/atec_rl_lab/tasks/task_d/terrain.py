@@ -129,27 +129,11 @@ def platform_terrain(difficulty: float, cfg: PlatformTerrainCfg) -> tuple[list[t
     return mesh_list, origin
 
 
-def flat_box_training_terrain(
-    difficulty: float, cfg: FlatBoxTrainingTerrainCfg
-) -> tuple[list[trimesh.Trimesh], np.ndarray]:
-    ground = trimesh.creation.box(
-        extents=(cfg.size[0], cfg.size[1], 0.1),
-        transform=trimesh.transformations.translation_matrix((cfg.size[0] / 2, cfg.size[1] / 2, -0.05)),
-    )
-    origin = np.array([cfg.size[0] * 0.15, cfg.size[1] / 2, 0.0])
-    return [ground], origin
-
-
 @configclass
 class PlatformTerrainCfg(SubTerrainBaseCfg):
     function = platform_terrain
     platform_width_range: tuple[float, float] = (1.9, 2.0)
     platform_height_range: tuple[float, float] = (0.5, 0.6)
-
-
-@configclass
-class FlatBoxTrainingTerrainCfg(SubTerrainBaseCfg):
-    function = flat_box_training_terrain
 
 
 TASK_D_TERRAIN_CFG = TerrainImporterCfg(
@@ -179,43 +163,6 @@ TASK_D_TERRAIN_CFG = TerrainImporterCfg(
         static_friction=1.0,
         dynamic_friction=1.0,
         restitution=1.0,
-    ),
-    visual_material=sim_utils.MdlFileCfg(
-        mdl_path=f"{ATEC_ASSETS_MODEL_DIR}/scene/TilesMarbleSpiderWhiteBrickBondHoned.mdl",
-        project_uvw=True,
-        texture_scale=(0.25, 0.25),
-    ),
-    debug_vis=False,
-)
-
-
-TASK_D_FLAT_TRAIN_TERRAIN_CFG = TerrainImporterCfg(
-    class_type=BetterTerrainImporter,
-    prim_path="/World/ground",
-    terrain_type="generator",
-    terrain_generator=TerrainGeneratorCfg(
-        class_type=BetterTerrainGenerator,
-        seed=0,
-        size=(80.0, 80.0),
-        border_width=0.0,
-        num_rows=1,
-        num_cols=1,
-        horizontal_scale=0.1,
-        vertical_scale=0.005,
-        slope_threshold=0.75,
-        use_cache=False,
-        sub_terrains={
-            "flat_box_training": FlatBoxTrainingTerrainCfg(proportion=1.0),
-        },
-    ),
-    max_init_terrain_level=0,
-    collision_group=-1,
-    physics_material=sim_utils.RigidBodyMaterialCfg(
-        friction_combine_mode="multiply",
-        restitution_combine_mode="multiply",
-        static_friction=1.0,
-        dynamic_friction=1.0,
-        restitution=0.0,
     ),
     visual_material=sim_utils.MdlFileCfg(
         mdl_path=f"{ATEC_ASSETS_MODEL_DIR}/scene/TilesMarbleSpiderWhiteBrickBondHoned.mdl",

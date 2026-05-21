@@ -75,7 +75,10 @@ class AlgSolution:
         self.CONTACT_TARGET_X = -3.08
         self.SIDE_PUSH_START_X = -1.25
         self.BOX_PRE_ROTATE_TARGET_X = -1.18
-        self.BOX_INSERT_TARGET_Y = 0.92
+        self.BOX_INSERT_TARGET_Y = 1.12
+        self.BOX_INSERT_Y_TOL = 0.08
+        self.BOX_EST_Y_MIN = 0.65
+        self.BOX_EST_Y_MAX = 2.05
         self.BOX_ROTATE_TARGET_YAW = -1.35
         self.DETACH_BACKUP_DISTANCE = 0.45
         self.detach_start_x = None
@@ -86,7 +89,7 @@ class AlgSolution:
         self.ROTATE_BOX_MIN_STEPS = 260
         self.ROTATE_BOX_MAX_STEPS = 520
         self.SIDE_FORWARD_TARGET_X = -0.85
-        self.INSERT_BOX_TARGET_Y = 0.92
+        self.INSERT_BOX_TARGET_Y = self.BOX_INSERT_TARGET_Y
         self.INSERT_BOX_MIN_STEPS = 220
         self.INSERT_BOX_MAX_STEPS = 620
         self.ALIGN_BEHIND_BOX_MIN_STEPS = 120
@@ -321,14 +324,16 @@ class AlgSolution:
         box pose instead of relying only on fixed step counts.
         """
         if self.lidar_box is not None and self.lidar_box["range"] <= 3.2 and self.lidar_box["count"] >= 8:
-            bearing_world = self.est_yaw + self.lidar_box["bearing"]
-            range_proxy = self.lidar_box.get("range", 1.2)
-            lidar_x = self.est_x + math.cos(bearing_world) * range_proxy
-            lidar_y = self.est_y + math.sin(bearing_world) * range_proxy
-            # The range is approximate, so blend it slowly instead of trusting it
-            # as ground truth. Bearing is the valuable part of this observation.
-            self.box_est_x = 0.88 * self.box_est_x + 0.12 * lidar_x
-            self.box_est_y = 0.82 * self.box_est_y + 0.18 * lidar_y
+            bearing = self.lidar_box["bearing"]
+            # Avoid fusing side/back wall-like clusters as box position. During
+            # corner/behind alignment, LiDAR often sees the box from the side.
+            if abs(bearing) < 1.45 or self.phase in ("MOVE_LEFT_TO_BOX_LANE", "CONTACT_BOX", "PUSH_BOX"):
+                bearing_world = self.est_yaw + bearing
+                range_proxy = self.lidar_box.get("range", 1.2)
+                lidar_x = self.est_x + math.cos(bearing_world) * range_proxy
+                lidar_y = self.est_y + math.sin(bearing_world) * range_proxy
+                self.box_est_x = 0.88 * self.box_est_x + 0.12 * lidar_x
+                self.box_est_y = 0.82 * self.box_est_y + 0.18 * lidar_y
 
         if self.phase in ("CONTACT_BOX", "PUSH_BOX"):
             observed_x = self.est_x + 0.72
@@ -345,7 +350,10 @@ class AlgSolution:
             self.box_est_yaw = max(self.BOX_ROTATE_TARGET_YAW, self.box_est_yaw - yaw_step)
 
         elif self.phase == "INSERT_BOX_TO_HOLE":
-            self.box_est_y = max(self.BOX_INSERT_TARGET_Y - 0.10, self.box_est_y - 0.0045)
+            y_error = self.box_est_y - self.BOX_INSERT_TARGET_Y
+            self.box_est_y -= max(-0.0035, min(0.0045, 0.004 * y_error))
+
+        self.box_est_y = float(max(self.BOX_EST_Y_MIN, min(self.BOX_EST_Y_MAX, self.box_est_y)))
 
         if self.current_score >= self.BRIDGE_SCORE_READY:
             self.bridge_ready = True
@@ -360,7 +368,7 @@ class AlgSolution:
 
     def _box_inserted_enough(self) -> bool:
         score_ready = self.current_score >= self.BRIDGE_SCORE_READY
-        pose_ready = self.box_est_y <= self.BOX_INSERT_TARGET_Y + 0.06
+        pose_ready = abs(self.box_est_y - self.BOX_INSERT_TARGET_Y) <= self.BOX_INSERT_Y_TOL
         sensor_ready = self._box_is_not_centered_front()
         robot_still_safe = self.est_x <= self.INSERT_MAX_ROBOT_X + 0.05
         return score_ready or (self.step >= self.INSERT_BOX_MIN_STEPS and pose_ready and sensor_ready and robot_still_safe)
@@ -788,11 +796,17 @@ class AlgSolution:
     def _insert_box_to_hole_action(self, obs, action_dim: int) -> torch.Tensor:
         """Push from behind the rotated box toward the pit/hole lane."""
         yaw_cmd = float(max(-0.35, min(0.35, -1.6 * self.est_yaw)))
-        y_error = max(0.0, self.box_est_y - self.BOX_INSERT_TARGET_Y)
+        y_error = self.box_est_y - self.BOX_INSERT_TARGET_Y
         # At this point the robot should be behind the rotated box, so insertion
         # should mostly be a straight -Y push, not another corner rotation.
         forward_cmd = 0.00
-        side_cmd = float(max(-1.0, min(-0.55, -0.62 - 0.55 * y_error)))
+        side_cmd = float(max(-0.95, min(-0.25, -0.55 - 0.60 * y_error)))
+        if self.box_est_y < self.BOX_INSERT_TARGET_Y - self.BOX_INSERT_Y_TOL:
+            # Box is already too far right/low in Y; stop forcing it into the wall.
+            side_cmd = max(side_cmd, -0.20)
+        elif self.box_est_y > self.BOX_INSERT_TARGET_Y + self.BOX_INSERT_Y_TOL:
+            # Box is too far left/high in Y; push harder toward the hole center.
+            side_cmd = min(side_cmd, -0.75)
         if self.lidar_box is not None:
             # Keep the box roughly centered while pushing from behind.
             forward_cmd = float(max(-0.12, min(0.12, 0.08 * self.lidar_box["bearing"])))
@@ -807,18 +821,20 @@ class AlgSolution:
         if self.step < self.ALIGN_BEHIND_BOX_MIN_STEPS:
             return False
         safe_x = self.est_x <= self.INSERT_MAX_ROBOT_X + 0.05
-        behind_y = self.est_y >= self.box_est_y + 0.55
+        behind_y = self.est_y >= min(self.BOX_EST_Y_MAX, self.box_est_y + 0.45)
         lidar_ok = self.lidar_box is None or abs(self.lidar_box["bearing"]) < 1.45
         return safe_x and behind_y and lidar_ok
 
     def _align_behind_rotated_box_action(self, obs, action_dim: int) -> torch.Tensor:
         """Move off the corner contact and line up behind the rotated box."""
         target_x = min(self.INSERT_MAX_ROBOT_X - 0.05, self.box_est_x - 0.05)
-        target_y = self.box_est_y + 0.75
+        target_y = min(self.BOX_EST_Y_MAX, self.box_est_y + 0.45)
         x_error = target_x - self.est_x
         y_error = target_y - self.est_y
         lin_x = float(max(-0.45, min(0.25, 0.9 * x_error)))
-        lin_y = float(max(-0.30, min(0.65, 0.9 * y_error)))
+        lin_y = float(max(-0.35, min(0.35, 0.75 * y_error)))
+        if self.est_y > self.BOX_EST_Y_MAX:
+            lin_y = min(lin_y, -0.20)
         yaw_cmd = float(max(-0.35, min(0.35, -1.5 * self.est_yaw)))
         self._set_velocity_command(lin_x, lin_y, yaw_cmd)
         return self._compute_base_action(obs, action_dim)

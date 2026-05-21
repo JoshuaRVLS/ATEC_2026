@@ -16,7 +16,7 @@ import isaaclab.sim as sim_utils
 
 from atec_rl_lab.tasks.task_base import BaseEnvCfg
 from atec_rl_lab.tasks.task_base.envs_base_cfg import TerminationsCfg as BaseTerminationsCfg
-from .terrain import TASK_D_FLAT_TRAIN_TERRAIN_CFG, TASK_D_TERRAIN_CFG, PitAndPlatformTerrainCfg
+from .terrain import TASK_D_TERRAIN_CFG, PitAndPlatformTerrainCfg
 
 @configclass
 class RewardsCfg:
@@ -225,16 +225,6 @@ class TaskDEnvB2Cfg(TaskDEnvCfg):
         self.actions.joint_pos_leg.joint_names = leg_joint_names
         self.actions.joint_pos_arm.joint_names = arm_joint_names
         self.actions.joint_vel_wheel = None
-
-
-@configclass
-class TaskDFlatTrainEnvB2Cfg(TaskDEnvB2Cfg):
-    def _build_terrain_cfg(self):
-        return copy.deepcopy(TASK_D_FLAT_TRAIN_TERRAIN_CFG)
-
-    def __post_init__(self):
-        super().__post_init__()
-        self.scene.env_spacing = 8.0
 
 
 @configclass
