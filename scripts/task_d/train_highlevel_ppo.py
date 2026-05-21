@@ -34,6 +34,9 @@ parser.add_argument("--ckpt_dir", type=str, default="logs/task_d_highlevel_ppo")
 parser.add_argument("--seed", type=int, default=42)
 parser.add_argument("--debug", action="store_true", default=False)
 parser.add_argument("--disable_fabric", action="store_true", default=False)
+parser.add_argument("--target_box_x", type=float, default=-0.35)
+parser.add_argument("--target_box_y", type=float, default=1.20)
+parser.add_argument("--target_box_yaw", type=float, default=math.pi / 2)
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
 args_cli.enable_cameras = True
@@ -250,11 +253,13 @@ def shaped_reward(
     box_yaw: torch.Tensor,
     actions: torch.Tensor,
 ) -> torch.Tensor:
-    yaw_err = torch.minimum(
-        torch.abs(angle_error(box_yaw, math.pi / 2)),
-        torch.abs(angle_error(box_yaw, -math.pi / 2)),
+    target_xy = torch.tensor(
+        [args_cli.target_box_x, args_cli.target_box_y],
+        device=args_cli.device,
+        dtype=torch.float32,
     )
-    prev_x = prev_box_pos[:, 0]
+    target_yaw = float(args_cli.target_box_yaw)
+
     box_x = box_pos[:, 0]
     box_y = box_pos[:, 1]
     robot_x = robot_pos[:, 0]
@@ -262,17 +267,18 @@ def shaped_reward(
     robot_z = robot_pos[:, 2]
     robot_box_dist = torch.linalg.norm(robot_pos[:, :2] - box_pos[:, :2], dim=-1)
 
-    x_progress = torch.clamp(box_x - prev_x, min=-0.05, max=0.05)
+    prev_goal_dist = torch.linalg.norm(prev_box_pos[:, :2] - target_xy, dim=-1)
+    goal_dist = torch.linalg.norm(box_pos[:, :2] - target_xy, dim=-1)
+    goal_progress = torch.clamp(prev_goal_dist - goal_dist, min=-0.05, max=0.05)
+    yaw_err = torch.abs(angle_error(box_yaw, target_yaw))
+    goal_pose_error = goal_dist + 0.45 * yaw_err
+
     approach_reward = torch.exp(-1.2 * robot_box_dist)
-    corner_x = box_x - 0.45
-    corner_y = box_y + 0.75
-    corner_dist = torch.sqrt((robot_x - corner_x) ** 2 + (robot_y - corner_y) ** 2)
-    corner_reward = torch.exp(-1.8 * corner_dist)
-    y_center = -torch.abs(box_y - 1.2)
-    yaw_reward = -yaw_err
-    yaw_progress = torch.clamp(math.pi / 2 - yaw_err, min=0.0, max=math.pi / 2) / (math.pi / 2)
-    rotate_bonus = (yaw_err < 0.35).to(torch.float32)
-    box_target_bonus = ((box_x > -1.4) & (box_x < 0.7) & (yaw_err < 0.45)).to(torch.float32)
+    contact_band_reward = ((robot_box_dist > 0.55) & (robot_box_dist < 1.35)).to(torch.float32)
+    yaw_goal_reward = torch.exp(-1.4 * yaw_err)
+    xy_goal_reward = torch.exp(-1.6 * goal_dist)
+    success_bonus = ((goal_dist < 0.35) & (yaw_err < 0.35)).to(torch.float32)
+    near_success_bonus = ((goal_dist < 0.70) & (yaw_err < 0.65)).to(torch.float32)
     robot_progress = torch.clamp(robot_pos[:, 0] + 3.0, min=0.0, max=6.0)
     action_penalty = torch.sum(actions * actions, dim=-1)
     fall_penalty = (robot_z < 0.35).to(torch.float32)
@@ -289,14 +295,14 @@ def shaped_reward(
     task_reward = env_reward.reshape(-1).to(args_cli.device, dtype=torch.float32)
     return (
         0.02 * task_reward
-        + 6.0 * x_progress
-        + 0.40 * approach_reward
-        + 0.60 * corner_reward
-        + 0.35 * yaw_reward
-        + 0.45 * yaw_progress
-        + 0.05 * y_center
-        + 0.5 * rotate_bonus
-        + 2.0 * box_target_bonus
+        + 8.0 * goal_progress
+        - 0.35 * goal_pose_error
+        + 0.35 * approach_reward
+        + 0.20 * contact_band_reward
+        + 0.45 * xy_goal_reward
+        + 0.45 * yaw_goal_reward
+        + 1.5 * near_success_bonus
+        + 5.0 * success_bonus
         + 0.02 * robot_progress
         - 0.002 * action_penalty
         - 0.01 * yaw_spin_penalty
