@@ -384,6 +384,10 @@ class AlgSolution:
         yaw_ready = self.box_est_yaw <= self.BOX_ROTATE_TARGET_YAW + 0.10
         return self._rotate_elapsed_steps() >= self.ROTATE_BOX_MIN_STEPS and yaw_ready
 
+    def _at_rotate_lane(self) -> bool:
+        """Robot must be on the +Y/left side before applying clockwise box rotation."""
+        return self.est_y >= self.BOX_LEFT_SIDE_Y - 0.25
+
     def _rotate_elapsed_steps(self) -> int:
         current_pulse_steps = self.step if self.phase == "ROTATE_BOX_RIGHT" else 0
         return self.rotate_pulse_count * self.ROTATE_PUSH_PULSE_STEPS + current_pulse_steps
@@ -714,7 +718,14 @@ class AlgSolution:
             self.phase = "MOVE_FORWARD_BESIDE_BOX"
             self.step = 0
         elif self.phase == "MOVE_FORWARD_BESIDE_BOX" and (
-            self.est_x >= self.ROTATE_CORNER_X - 0.08 or self.step >= 360
+            (self.est_x >= self.ROTATE_CORNER_X - 0.08 or self.step >= 360)
+            and not self._at_rotate_lane()
+        ):
+            self.phase = "MOVE_LEFT_OF_BOX"
+            self.step = 0
+        elif self.phase == "MOVE_FORWARD_BESIDE_BOX" and (
+            (self.est_x >= self.ROTATE_CORNER_X - 0.08 or self.step >= 360)
+            and self._at_rotate_lane()
         ):
             self.phase = "ROTATE_BOX_RIGHT"
             self.rotate_no_progress_ticks = 0
@@ -727,7 +738,15 @@ class AlgSolution:
             self.phase = "RETREAT_FROM_PIT"
             self.step = 0
         elif self.phase == "RETREAT_FROM_PIT" and self.est_x <= self.PIT_RETREAT_X:
-            self.phase = "MOVE_FORWARD_BESIDE_BOX" if not self._box_rotation_ready() else "ALIGN_BEHIND_ROTATED_BOX"
+            if self._box_rotation_ready():
+                self.phase = "ALIGN_BEHIND_ROTATED_BOX"
+            else:
+                self.phase = "MOVE_FORWARD_BESIDE_BOX" if self._at_rotate_lane() else "MOVE_LEFT_OF_BOX"
+            self.step = 0
+        elif self.phase == "ROTATE_BOX_RIGHT" and not self._at_rotate_lane():
+            self.phase = "MOVE_LEFT_OF_BOX"
+            self.rotate_no_progress_ticks = 0
+            self.rotate_release_ticks = 0
             self.step = 0
         elif self.phase == "ROTATE_BOX_RIGHT" and self._box_rotation_ready():
             self.phase = "ALIGN_BEHIND_ROTATED_BOX"
@@ -869,6 +888,10 @@ class AlgSolution:
     def _rotate_box_right_action(self, obs, action_dim: int) -> torch.Tensor:
         """Short diagonal push pulse on the box corner."""
         yaw_cmd = float(max(-0.35, min(0.35, -1.6 * self.est_yaw)))
+        if not self._at_rotate_lane():
+            self._set_velocity_command(-0.25, 0.75, yaw_cmd)
+            return self._compute_base_action(obs, action_dim)
+
         if not self.bridge_ready and self.est_x > self.PIT_GUARD_X:
             self._set_velocity_command(-0.45, 0.15, yaw_cmd)
             return self._compute_base_action(obs, action_dim)
