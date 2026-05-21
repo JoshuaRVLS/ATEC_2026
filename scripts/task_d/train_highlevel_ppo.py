@@ -31,6 +31,7 @@ parser.add_argument("--max_grad_norm", type=float, default=1.0)
 parser.add_argument("--save_every", type=int, default=25)
 parser.add_argument("--out", type=str, default="demo/high_level_ppo.pt")
 parser.add_argument("--ckpt_dir", type=str, default="logs/task_d_highlevel_ppo")
+parser.add_argument("--resume", type=str, default=None, help="Path to a PPO checkpoint to resume/fine-tune from.")
 parser.add_argument("--seed", type=int, default=42)
 parser.add_argument("--debug", action="store_true", default=False)
 parser.add_argument("--disable_fabric", action="store_true", default=False)
@@ -363,10 +364,28 @@ def main():
     obs_mean = torch.zeros(obs_dim, device=args_cli.device)
     obs_var = torch.ones(obs_dim, device=args_cli.device)
     obs_count = torch.tensor(1e-4, device=args_cli.device)
+    start_iteration = 1
+
+    if args_cli.resume is not None:
+        checkpoint = torch.load(args_cli.resume, map_location=args_cli.device)
+        if int(checkpoint.get("obs_dim", obs_dim)) != obs_dim:
+            raise ValueError(
+                f"Checkpoint obs_dim={checkpoint.get('obs_dim')} does not match current obs_dim={obs_dim}."
+            )
+        model.load_state_dict(checkpoint["model"])
+        if "optimizer" in checkpoint:
+            optimizer.load_state_dict(checkpoint["optimizer"])
+        obs_mean = checkpoint["obs_mean"].to(args_cli.device, dtype=torch.float32)
+        obs_std = checkpoint["obs_std"].to(args_cli.device, dtype=torch.float32).clamp_min(1e-4)
+        obs_var = obs_std * obs_std
+        obs_count = checkpoint.get("obs_count", torch.tensor(1e-4)).to(args_cli.device, dtype=torch.float32)
+        start_iteration = int(checkpoint.get("iteration", 0)) + 1
+        print(f"[ppo] resumed {args_cli.resume} from iteration {start_iteration}")
 
     prev_box_pos = box_pos.detach().clone()
 
-    for iteration in range(1, args_cli.iterations + 1):
+    end_iteration = start_iteration + args_cli.iterations - 1
+    for iteration in range(start_iteration, end_iteration + 1):
         obs_buf = torch.zeros((args_cli.horizon, args_cli.num_envs, obs_dim), device=args_cli.device)
         raw_action_buf = torch.zeros((args_cli.horizon, args_cli.num_envs, 3), device=args_cli.device)
         logprob_buf = torch.zeros((args_cli.horizon, args_cli.num_envs), device=args_cli.device)
@@ -480,8 +499,10 @@ def main():
             torch.save(
                 {
                     "model": model.state_dict(),
+                    "optimizer": optimizer.state_dict(),
                     "obs_mean": obs_mean.detach().cpu(),
                     "obs_std": torch.sqrt(obs_var).clamp_min(1e-4).detach().cpu(),
+                    "obs_count": obs_count.detach().cpu(),
                     "obs_dim": obs_dim,
                     "iteration": iteration,
                 },
