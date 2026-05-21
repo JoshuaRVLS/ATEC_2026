@@ -79,9 +79,14 @@ class AlgSolution:
         self.contact_ticks = 0
         self.BOX_LEFT_SIDE_Y = 2.65
         self.ROTATE_CORNER_X = -1.05
-        self.ROTATE_RIGHT_TARGET_Y = 1.70
+        self.ROTATE_RIGHT_TARGET_Y = 1.62
+        self.ROTATE_BOX_MIN_STEPS = 260
+        self.ROTATE_BOX_MAX_STEPS = 520
         self.SIDE_FORWARD_TARGET_X = -0.85
-        self.RIGHT_PUSH_TARGET_Y = 1.20
+        self.INSERT_BOX_TARGET_Y = 0.92
+        self.INSERT_BOX_MIN_STEPS = 220
+        self.INSERT_BOX_MAX_STEPS = 620
+        self.POST_INSERT_BACKUP_STEPS = 90
         self.stuck_ticks = 0
         self.prev_est_x = self.est_x
         self.prev_est_y = self.est_y
@@ -503,13 +508,25 @@ class AlgSolution:
         elif self.phase == "MOVE_LEFT_OF_BOX" and self.est_y >= self.BOX_LEFT_SIDE_Y:
             self.phase = "MOVE_FORWARD_BESIDE_BOX"
             self.step = 0
-        elif self.phase == "MOVE_FORWARD_BESIDE_BOX" and self.est_x >= self.ROTATE_CORNER_X:
+        elif self.phase == "MOVE_FORWARD_BESIDE_BOX" and (
+            self.est_x >= self.ROTATE_CORNER_X - 0.08 or self.step >= 360
+        ):
             self.phase = "ROTATE_BOX_RIGHT"
             self.step = 0
-        elif self.phase == "ROTATE_BOX_RIGHT" and self.est_y <= self.ROTATE_RIGHT_TARGET_Y:
-            self.phase = "PUSH_BOX_RIGHT"
+        elif self.phase == "ROTATE_BOX_RIGHT" and (
+            (self.est_y <= self.ROTATE_RIGHT_TARGET_Y and self.step >= self.ROTATE_BOX_MIN_STEPS)
+            or self.step >= self.ROTATE_BOX_MAX_STEPS
+        ):
+            self.phase = "INSERT_BOX_TO_HOLE"
             self.step = 0
-        elif self.phase == "PUSH_BOX_RIGHT" and self.est_y <= self.RIGHT_PUSH_TARGET_Y:
+        elif self.phase == "INSERT_BOX_TO_HOLE" and (
+            (self.est_y <= self.INSERT_BOX_TARGET_Y and self.step >= self.INSERT_BOX_MIN_STEPS)
+            or self.step >= self.INSERT_BOX_MAX_STEPS
+            or current_score >= 14.0
+        ):
+            self.phase = "RELEASE_BOX"
+            self.step = 0
+        elif self.phase == "RELEASE_BOX" and self.step >= self.POST_INSERT_BACKUP_STEPS:
             self.phase = "CROSS"
             self.step = 0
 
@@ -529,8 +546,10 @@ class AlgSolution:
             action = self._move_forward_beside_box_action(obs, action_dim)
         elif self.phase == "ROTATE_BOX_RIGHT":
             action = self._rotate_box_right_action(obs, action_dim)
-        elif self.phase == "PUSH_BOX_RIGHT":
-            action = self._push_box_right_action(obs, action_dim)
+        elif self.phase == "INSERT_BOX_TO_HOLE":
+            action = self._insert_box_to_hole_action(obs, action_dim)
+        elif self.phase == "RELEASE_BOX":
+            action = self._release_box_action(obs, action_dim)
         else:
             action = self._cross_action(obs, action_dim)
 
@@ -584,22 +603,28 @@ class AlgSolution:
         y_error = self.BOX_LEFT_SIDE_Y - self.est_y
         lin_y = float(max(-0.15, min(0.35, 0.9 * y_error)))
         yaw_cmd = float(max(-0.30, min(0.30, -1.2 * self.est_yaw)))
-        self._set_velocity_command(0.75, lin_y, yaw_cmd)
+        self._set_velocity_command(0.90, lin_y, yaw_cmd)
         return self._compute_base_action(obs, action_dim)
 
     def _rotate_box_right_action(self, obs, action_dim: int) -> torch.Tensor:
-        """Push diagonally on the box corner to create yaw before insertion."""
+        """Push the box corner diagonally so the box rotates before insertion."""
         yaw_cmd = float(max(-0.35, min(0.35, -1.6 * self.est_yaw)))
-        self._set_velocity_command(0.45, -0.95, yaw_cmd)
+        self._set_velocity_command(0.55, -1.00, yaw_cmd)
         base_action = self._compute_base_action(obs, action_dim)
         return torch.clamp(base_action, -1.0, 1.0)
 
-    def _push_box_right_action(self, obs, action_dim: int) -> torch.Tensor:
-        """Push from the left side of the box toward -Y."""
+    def _insert_box_to_hole_action(self, obs, action_dim: int) -> torch.Tensor:
+        """After rotation, push the box toward the pit/hole lane."""
         yaw_cmd = float(max(-0.35, min(0.35, -1.6 * self.est_yaw)))
-        self._set_velocity_command(0.15, -1.00, yaw_cmd)
+        self._set_velocity_command(0.08, -1.00, yaw_cmd)
         base_action = self._compute_base_action(obs, action_dim)
         return torch.clamp(base_action, -1.0, 1.0)
+
+    def _release_box_action(self, obs, action_dim: int) -> torch.Tensor:
+        """Back away after insertion so the robot does not stay wedged on the box."""
+        yaw_cmd = float(max(-0.35, min(0.35, -1.5 * self.est_yaw)))
+        self._set_velocity_command(-0.45, 0.30, yaw_cmd)
+        return self._compute_base_action(obs, action_dim)
 
     def _cross_action(self, obs, action_dim: int) -> torch.Tensor:
         """Continue forward after the box interaction attempt."""
