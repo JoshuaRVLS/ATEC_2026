@@ -92,6 +92,8 @@ class AlgSolution:
         self.prev_est_y = self.est_y
         self.depth_box = None
         self.lidar_box = None
+        self.prev_lidar_bearing = None
+        self.lidar_bearing_delta = 0.0
         self._printed_lidar_shape = False
         self.LIDAR_CONTROL_SIGN = 1.0
         self._last_logged_phase = None
@@ -452,6 +454,14 @@ class AlgSolution:
             "count": int(mask.sum().item()),
             "strength": float(weights.mean().item()),
         }
+        if self.prev_lidar_bearing is not None:
+            delta = bearing - self.prev_lidar_bearing
+            while delta > math.pi:
+                delta -= 2.0 * math.pi
+            while delta < -math.pi:
+                delta += 2.0 * math.pi
+            self.lidar_bearing_delta = 0.85 * self.lidar_bearing_delta + 0.15 * delta
+        self.prev_lidar_bearing = bearing
         self.lidar_box = estimate
         return estimate
 
@@ -514,13 +524,21 @@ class AlgSolution:
             self.phase = "ROTATE_BOX_RIGHT"
             self.step = 0
         elif self.phase == "ROTATE_BOX_RIGHT" and (
-            (self.est_y <= self.ROTATE_RIGHT_TARGET_Y and self.step >= self.ROTATE_BOX_MIN_STEPS)
+            (
+                self.est_y <= self.ROTATE_RIGHT_TARGET_Y
+                and self.step >= self.ROTATE_BOX_MIN_STEPS
+                and self._box_seen_on_right_side()
+            )
             or self.step >= self.ROTATE_BOX_MAX_STEPS
         ):
             self.phase = "INSERT_BOX_TO_HOLE"
             self.step = 0
         elif self.phase == "INSERT_BOX_TO_HOLE" and (
-            (self.est_y <= self.INSERT_BOX_TARGET_Y and self.step >= self.INSERT_BOX_MIN_STEPS)
+            (
+                self.est_y <= self.INSERT_BOX_TARGET_Y
+                and self.step >= self.INSERT_BOX_MIN_STEPS
+                and self._box_is_not_centered_front()
+            )
             or self.step >= self.INSERT_BOX_MAX_STEPS
             or current_score >= 14.0
         ):
@@ -609,16 +627,37 @@ class AlgSolution:
     def _rotate_box_right_action(self, obs, action_dim: int) -> torch.Tensor:
         """Push the box corner diagonally so the box rotates before insertion."""
         yaw_cmd = float(max(-0.35, min(0.35, -1.6 * self.est_yaw)))
-        self._set_velocity_command(0.55, -1.00, yaw_cmd)
+        side_cmd = -1.0
+        if self.lidar_box is not None:
+            # Keep the box on the front-right corner while rotating it.
+            side_cmd = float(max(-1.0, min(-0.55, -0.80 - 0.15 * self.lidar_box["bearing"])))
+        self._set_velocity_command(0.55, side_cmd, yaw_cmd)
         base_action = self._compute_base_action(obs, action_dim)
         return torch.clamp(base_action, -1.0, 1.0)
 
     def _insert_box_to_hole_action(self, obs, action_dim: int) -> torch.Tensor:
         """After rotation, push the box toward the pit/hole lane."""
         yaw_cmd = float(max(-0.35, min(0.35, -1.6 * self.est_yaw)))
-        self._set_velocity_command(0.08, -1.00, yaw_cmd)
+        forward_cmd = 0.08
+        side_cmd = -1.0
+        if self.lidar_box is not None:
+            # If the box drifts too far front/left in LiDAR, add a little +X pressure.
+            forward_cmd = float(max(0.04, min(0.22, 0.08 + 0.06 * abs(self.lidar_box["bearing"]))))
+        self._set_velocity_command(forward_cmd, side_cmd, yaw_cmd)
         base_action = self._compute_base_action(obs, action_dim)
         return torch.clamp(base_action, -1.0, 1.0)
+
+    def _box_seen_on_right_side(self) -> bool:
+        """Return True once LiDAR suggests the box has moved to robot's right side."""
+        if self.lidar_box is None:
+            return False
+        return self.lidar_box["bearing"] < -0.35 or self.lidar_bearing_delta < -0.015
+
+    def _box_is_not_centered_front(self) -> bool:
+        """Insertion likely progressed when the box is no longer centered ahead."""
+        if self.lidar_box is None:
+            return False
+        return abs(self.lidar_box["bearing"]) > 0.55
 
     def _release_box_action(self, obs, action_dim: int) -> torch.Tensor:
         """Back away after insertion so the robot does not stay wedged on the box."""
