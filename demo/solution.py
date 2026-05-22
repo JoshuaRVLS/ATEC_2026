@@ -106,6 +106,7 @@ class AlgSolution:
         self.PIT_RETREAT_X = -1.35
         self.INSERT_MAX_ROBOT_X = -1.02
         self.RELEASE_SAFE_X = -1.25
+        self.HEAD_CAMERA_FOV_X_RAD = 0.82
         self.stuck_ticks = 0
         self.prev_est_x = self.est_x
         self.prev_est_y = self.est_y
@@ -113,7 +114,11 @@ class AlgSolution:
         self.box_est_y = 1.6
         self.box_est_yaw = 0.0
         self.box_yaw_confidence = 0.0
+        self.box_sensor_confidence = 0.0
         self.bridge_ready = False
+        self.bridge_ready_ticks = 0
+        self.bridge_not_ready_ticks = 0
+        self.center_box_done = False
         self.insert_attempts = 0
         self.MAX_INSERT_ATTEMPTS = 4
         self.current_score = 0.0
@@ -295,7 +300,7 @@ class AlgSolution:
                 f"cmd=({cmd[0]:+.2f}, {cmd[1]:+.2f}, {cmd[2]:+.2f}) "
                 f"pose=({self.est_x:+.2f}, {self.est_y:+.2f}, {self.est_yaw:+.2f}) "
                 f"box_est=({self.box_est_x:+.2f}, {self.box_est_y:+.2f}, {self.box_est_yaw:+.2f}) "
-                f"yaw_conf={self.box_yaw_confidence:.2f} "
+                f"yaw_conf={self.box_yaw_confidence:.2f} sensor_conf={self.box_sensor_confidence:.2f} "
                 f"bridge_ready={self.bridge_ready} insert_attempts={self.insert_attempts} "
                 f"rotate_pulses={self.rotate_pulse_count} rotate_strategy={self._rotate_strategy_name()} "
                 f"depth_box={self.depth_box} lidar_box={self.lidar_box}"
@@ -335,6 +340,59 @@ class AlgSolution:
         self.prev_est_x = self.est_x
         self.prev_est_y = self.est_y
 
+    def _fuse_box_position_candidate(
+        self,
+        cand_x: float,
+        cand_y: float,
+        confidence: float,
+        max_jump: float = 1.2,
+    ) -> bool:
+        """Fuse a sensed box position only when it is plausible enough."""
+        if confidence <= 0.0:
+            return False
+
+        jump = math.hypot(cand_x - self.box_est_x, cand_y - self.box_est_y)
+        if self.box_sensor_confidence > 0.30 and jump > max_jump:
+            return False
+
+        alpha = float(max(0.04, min(0.35, confidence)))
+        self.box_est_x = (1.0 - alpha) * self.box_est_x + alpha * cand_x
+        self.box_est_y = (1.0 - alpha) * self.box_est_y + alpha * cand_y
+        self.box_sensor_confidence = min(1.0, 0.92 * self.box_sensor_confidence + confidence)
+        return True
+
+    def _fuse_depth_box_position(self) -> None:
+        """Use camera depth as a high-confidence box center when available."""
+        if self.depth_box is None:
+            return
+        area = self.depth_box.get("area_frac", 0.0)
+        width = self.depth_box.get("width_frac", 0.0)
+        distance = self.depth_box.get("distance", 0.0)
+        if not (0.01 <= area <= 0.35 and 0.04 <= width <= 0.65 and 0.25 <= distance <= 4.0):
+            return
+
+        bearing = float(self.depth_box["x_error"]) * (self.HEAD_CAMERA_FOV_X_RAD * 0.5)
+        world_bearing = self.est_yaw + bearing
+        cand_x = self.est_x + math.cos(world_bearing) * distance
+        cand_y = self.est_y + math.sin(world_bearing) * distance
+        confidence = 0.22 + min(0.16, area * 0.8)
+        self._fuse_box_position_candidate(cand_x, cand_y, confidence, max_jump=1.0)
+
+    def _update_bridge_ready(self) -> None:
+        """Debounce bridge readiness so one noisy sensor frame cannot flip it."""
+        raw_ready = self._bridge_pose_ready_raw()
+        if raw_ready:
+            self.bridge_ready_ticks += 1
+            self.bridge_not_ready_ticks = 0
+        else:
+            self.bridge_not_ready_ticks += 1
+            self.bridge_ready_ticks = 0
+
+        if self.bridge_ready_ticks >= 6:
+            self.bridge_ready = True
+        elif self.bridge_not_ready_ticks >= 10:
+            self.bridge_ready = False
+
     def _update_box_pose_model(self) -> None:
         """Maintain a coarse box pose estimate for target-based manipulation.
 
@@ -342,8 +400,13 @@ class AlgSolution:
         assumptions with LiDAR bearing changes so phase decisions can target the
         box pose instead of relying only on fixed step counts.
         """
+        allow_lidar_position_update = (
+            not self.center_box_done
+            and self.box_yaw_confidence < 0.35
+            and self.phase not in ("CENTER_BOX_Y", "ROTATE_BOX_RIGHT", "ROTATE_RELEASE_OBSERVE", "ALIGN_BEHIND_ROTATED_BOX")
+        )
         if (
-            self.phase != "CENTER_BOX_Y"
+            allow_lidar_position_update
             and self.lidar_box is not None
             and self.lidar_box["range"] <= 2.6
             and self.lidar_box["count"] >= 12
@@ -356,8 +419,9 @@ class AlgSolution:
                 range_proxy = self.lidar_box.get("range", 1.2)
                 lidar_x = self.est_x + math.cos(bearing_world) * range_proxy
                 lidar_y = self.est_y + math.sin(bearing_world) * range_proxy
-                self.box_est_x = 0.88 * self.box_est_x + 0.12 * lidar_x
-                self.box_est_y = 0.82 * self.box_est_y + 0.18 * lidar_y
+                self._fuse_box_position_candidate(lidar_x, lidar_y, confidence=0.12, max_jump=1.4)
+
+        self._fuse_depth_box_position()
 
         if self.phase in ("CONTACT_BOX", "PUSH_BOX"):
             observed_x = self.est_x + 0.72
@@ -396,7 +460,8 @@ class AlgSolution:
 
         self.box_est_y = float(max(self.BOX_EST_Y_MIN, min(self.BOX_EST_Y_MAX, self.box_est_y)))
 
-        self.bridge_ready = self._bridge_pose_ready()
+        self.box_sensor_confidence = max(0.0, self.box_sensor_confidence * 0.995)
+        self._update_bridge_ready()
 
     def _box_x_ready_for_rotation(self) -> bool:
         return self.box_est_x >= self.BOX_PRE_ROTATE_TARGET_X or self.est_x >= self.SIDE_PUSH_START_X
@@ -405,9 +470,10 @@ class AlgSolution:
         return abs(self.box_est_y - self.BOX_INSERT_TARGET_Y) <= self.CENTER_BOX_Y_TOL
 
     def _box_rotation_ready(self) -> bool:
-        yaw_ready = self.box_est_yaw <= -0.75
+        yaw_ready = self.box_est_yaw <= -0.72
         confidence_ready = self.box_yaw_confidence >= 0.35
-        return self._rotate_elapsed_steps() >= self.ROTATE_BOX_MIN_STEPS and yaw_ready and confidence_ready
+        enough_contact = self._rotate_elapsed_steps() >= self.ROTATE_PUSH_PULSE_STEPS * 2
+        return yaw_ready and confidence_ready and enough_contact
 
     def _at_rotate_lane(self) -> bool:
         """Robot must be on the +Y/left side before applying clockwise box rotation."""
@@ -455,13 +521,16 @@ class AlgSolution:
         robot_still_safe = self.est_x <= self.INSERT_MAX_ROBOT_X + 0.05
         return self.step >= self.INSERT_BOX_MIN_STEPS and pose_ready and sensor_ready and robot_still_safe
 
-    def _bridge_pose_ready(self) -> bool:
+    def _bridge_pose_ready_raw(self) -> bool:
         """Only allow crossing when the estimated box pose can plausibly bridge the hole."""
         y_ready = abs(self.box_est_y - self.BOX_INSERT_TARGET_Y) <= self.BOX_INSERT_Y_TOL
         yaw_ready = self.box_est_yaw <= -0.75
         confidence_ready = self.box_yaw_confidence >= 0.35
         x_ready = self.box_est_x >= -0.85
         return y_ready and yaw_ready and confidence_ready and x_ready
+
+    def _bridge_pose_ready(self) -> bool:
+        return self.bridge_ready
 
     def _get_image_tensor(self, obs, *names):
         image_obs = obs.get("image", {}) if isinstance(obs, dict) else {}
@@ -759,7 +828,7 @@ class AlgSolution:
         action_dim = (int(proprio.shape[-1]) - 12) // 3
         self._update_pose_estimate(proprio)
         self._update_stuck_counter()
-        self.depth_box = None
+        self._estimate_box_from_depth(obs)
         self._estimate_box_from_lidar(obs)
         self._update_box_pose_model()
 
@@ -782,6 +851,7 @@ class AlgSolution:
             self.phase = "DETACH_FROM_BOX"
             self.detach_start_x = self.est_x
             self.rotation_session_active = False
+            self.center_box_done = False
             self.step = 0
         elif (
             self.phase == "DETACH_FROM_BOX"
@@ -792,12 +862,13 @@ class AlgSolution:
             self.detach_start_x = None
             self.step = 0
         elif self.phase == "MOVE_LEFT_OF_BOX" and self.est_y >= self.BOX_LEFT_SIDE_Y:
-            self.phase = "CENTER_BOX_Y"
+            self.phase = "MOVE_FORWARD_BESIDE_BOX" if self.center_box_done else "CENTER_BOX_Y"
             self.step = 0
         elif self.phase == "CENTER_BOX_Y" and (
             (self.step >= self.CENTER_BOX_MIN_STEPS and self._box_y_centered_for_rotation())
             or self.step >= self.CENTER_BOX_MAX_STEPS
         ):
+            self.center_box_done = True
             self.phase = "MOVE_FORWARD_BESIDE_BOX"
             self.step = 0
         elif self.phase == "MOVE_FORWARD_BESIDE_BOX" and (
