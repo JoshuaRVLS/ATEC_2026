@@ -300,6 +300,7 @@ class AlgSolution:
                 f"cmd=({cmd[0]:+.2f}, {cmd[1]:+.2f}, {cmd[2]:+.2f}) "
                 f"pose=({self.est_x:+.2f}, {self.est_y:+.2f}, {self.est_yaw:+.2f}) "
                 f"box_est=({self.box_est_x:+.2f}, {self.box_est_y:+.2f}, {self.box_est_yaw:+.2f}) "
+                f"rot_x_target={self._rotate_x_target():+.2f} "
                 f"yaw_conf={self.box_yaw_confidence:.2f} sensor_conf={self.box_sensor_confidence:.2f} "
                 f"bridge_ready={self.bridge_ready} insert_attempts={self.insert_attempts} "
                 f"rotate_pulses={self.rotate_pulse_count} rotate_strategy={self._rotate_strategy_name()} "
@@ -478,6 +479,13 @@ class AlgSolution:
     def _at_rotate_lane(self) -> bool:
         """Robot must be on the +Y/left side before applying clockwise box rotation."""
         return self.est_y >= self.BOX_LEFT_SIDE_Y - 0.25
+
+    def _rotate_x_target(self) -> float:
+        """Target x beside the box corner, clamped before the pit."""
+        return min(self.PIT_GUARD_X - 0.22, self.box_est_x + 0.20)
+
+    def _at_rotate_x_position(self) -> bool:
+        return abs(self.est_x - self._rotate_x_target()) <= 0.12
 
     def _rotate_elapsed_steps(self) -> int:
         current_pulse_steps = self.step if self.phase == "ROTATE_BOX_RIGHT" else 0
@@ -872,13 +880,13 @@ class AlgSolution:
             self.phase = "MOVE_FORWARD_BESIDE_BOX"
             self.step = 0
         elif self.phase == "MOVE_FORWARD_BESIDE_BOX" and (
-            (self.est_x >= self.ROTATE_CORNER_X - 0.08 or self.step >= 360)
+            (self._at_rotate_x_position() or self.step >= 360)
             and not self._at_rotate_lane()
         ):
             self.phase = "MOVE_LEFT_OF_BOX"
             self.step = 0
         elif self.phase == "MOVE_FORWARD_BESIDE_BOX" and (
-            (self.est_x >= self.ROTATE_CORNER_X - 0.08 or self.step >= 360)
+            (self._at_rotate_x_position() or self.step >= 360)
             and self._at_rotate_lane()
         ):
             self.phase = "ROTATE_BOX_RIGHT"
@@ -1061,11 +1069,13 @@ class AlgSolution:
     def _move_forward_beside_box_action(self, obs, action_dim: int) -> torch.Tensor:
         """Move forward on the left side until reaching an off-center rotate point."""
         y_error = self.BOX_LEFT_SIDE_Y - self.est_y
-        x_error = (self.box_est_x + 0.18) - self.est_x
+        x_error = self._rotate_x_target() - self.est_x
         lin_y = float(max(-0.35, min(0.35, 0.9 * y_error)))
         if self.est_y > self.BOX_LEFT_SIDE_Y + 0.18:
             lin_y = min(lin_y, -0.35)
-        lin_x = float(max(0.35, min(0.90, 0.65 + 0.45 * x_error)))
+        lin_x = float(max(-0.25, min(0.90, 0.85 * x_error)))
+        if abs(x_error) < 0.10:
+            lin_x = 0.0
         yaw_cmd = float(max(-0.30, min(0.30, -1.2 * self.est_yaw)))
         self._set_velocity_command(lin_x, lin_y, yaw_cmd)
         return self._compute_base_action(obs, action_dim)
