@@ -78,8 +78,8 @@ class AlgSolution:
         self.BOX_INSERT_TARGET_Y = 1.12
         self.BOX_INSERT_Y_TOL = 0.08
         self.CENTER_BOX_Y_TOL = 0.12
-        self.CENTER_BOX_MIN_STEPS = 110
-        self.CENTER_BOX_MAX_STEPS = 300
+        self.CENTER_BOX_MIN_STEPS = 170
+        self.CENTER_BOX_MAX_STEPS = 220
         self.BOX_EST_Y_MIN = 0.65
         self.BOX_EST_Y_MAX = 2.05
         self.BOX_ROTATE_TARGET_YAW = -1.35
@@ -342,7 +342,12 @@ class AlgSolution:
         assumptions with LiDAR bearing changes so phase decisions can target the
         box pose instead of relying only on fixed step counts.
         """
-        if self.lidar_box is not None and self.lidar_box["range"] <= 2.6 and self.lidar_box["count"] >= 12:
+        if (
+            self.phase != "CENTER_BOX_Y"
+            and self.lidar_box is not None
+            and self.lidar_box["range"] <= 2.6
+            and self.lidar_box["count"] >= 12
+        ):
             bearing = self.lidar_box["bearing"]
             # Avoid fusing side/back wall-like clusters as box position. During
             # corner/behind alignment, LiDAR often sees the box from the side.
@@ -367,7 +372,10 @@ class AlgSolution:
             # While pushing from the +Y side, model the box sliding toward the
             # hole center. This keeps the next rotation away from the pit edge.
             y_error = self.box_est_y - self.BOX_INSERT_TARGET_Y
-            self.box_est_y -= max(-0.0025, min(0.0055, 0.005 * y_error))
+            if y_error > self.CENTER_BOX_Y_TOL:
+                self.box_est_y -= 0.006
+            elif y_error < -self.CENTER_BOX_Y_TOL:
+                self.box_est_y += 0.002
 
         elif self.phase == "ROTATE_BOX_RIGHT":
             yaw_before = self.box_est_yaw
@@ -961,21 +969,21 @@ class AlgSolution:
         yaw_cmd = float(max(-0.35, min(0.35, -1.5 * self.est_yaw)))
         y_error = self.box_est_y - self.BOX_INSERT_TARGET_Y
 
-        # Stay on the +Y side first. If the robot is too low, sliding right will
-        # miss the box and just move the robot around the pit.
-        if self.est_y < self.BOX_LEFT_SIDE_Y - 0.15:
-            self._set_velocity_command(-0.05, 0.70, yaw_cmd)
+        # Only recover upward if we are clearly no longer on the +Y side. Avoid
+        # oscillating left-right while the box needs one clean side push.
+        if self.est_y < self.BOX_LEFT_SIDE_Y - 0.35:
+            self._set_velocity_command(-0.05, 0.55, yaw_cmd)
             return self._compute_base_action(obs, action_dim)
 
         # Positive y_error means the box is left/high of the hole center, so the
         # robot pushes it right/down in -Y while keeping slight forward contact.
         if y_error > self.CENTER_BOX_Y_TOL:
-            lin_y = -0.85
+            lin_y = -0.95
         elif y_error < -self.CENTER_BOX_Y_TOL:
-            lin_y = 0.25
+            lin_y = 0.10
         else:
-            lin_y = -0.20
-        self._set_velocity_command(0.12, lin_y, yaw_cmd)
+            lin_y = -0.30
+        self._set_velocity_command(0.16, lin_y, yaw_cmd)
         base_action = self._compute_base_action(obs, action_dim)
         return torch.clamp(base_action, -1.0, 1.0)
 
