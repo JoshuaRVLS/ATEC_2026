@@ -552,7 +552,18 @@ class AlgSolution:
         return None
 
     def _get_depth_image(self, obs):
-        depth = self._get_image_tensor(obs, "head_depth", "video_depth", "ee_depth")
+        # For Task D the head depth often sees a broad flat platform at almost
+        # constant depth. Prefer the end-effector camera, then fall back.
+        self.depth_source = None
+        depth = None
+        image_obs = obs.get("image", {}) if isinstance(obs, dict) else {}
+        if isinstance(image_obs, dict):
+            for name in ("ee_depth", "head_depth", "video_depth"):
+                value = image_obs.get(name)
+                if value is not None:
+                    depth = value
+                    self.depth_source = name
+                    break
         if depth is None:
             return None
 
@@ -584,7 +595,7 @@ class AlgSolution:
         valid_depth = roi[valid]
         if valid_depth.numel() < 200:
             self.depth_box = None
-            self.depth_debug = f"few_valid:{int(valid_depth.numel())}"
+            self.depth_debug = f"{self.depth_source}:few_valid:{int(valid_depth.numel())}"
             return None
 
         flat = valid_depth.flatten()
@@ -606,7 +617,12 @@ class AlgSolution:
         area_frac = float(near_pixels) / float(max(1, roi_pixels))
         if near_pixels < 80 or area_frac > 0.65:
             self.depth_box = None
-            self.depth_debug = f"bad_area:pixels={near_pixels},area={area_frac:.3f},near={float(near_depth.item()):.2f}"
+            self.depth_debug = (
+                f"{self.depth_source}:bad_area:pixels={near_pixels},"
+                f"area={area_frac:.3f},near={float(near_depth.item()):.2f},"
+                f"min={float(valid_depth.min().item()):.2f},"
+                f"max={float(valid_depth.max().item()):.2f}"
+            )
             return None
 
         ys_roi, xs_roi = torch.where(near_mask)
@@ -618,7 +634,7 @@ class AlgSolution:
         height_frac = float(bbox_h) / float(max(1, near_mask.shape[0]))
         if width_frac < 0.025 or height_frac < 0.035 or width_frac > 0.95 or height_frac > 0.95:
             self.depth_box = None
-            self.depth_debug = f"bad_bbox:w={width_frac:.2f},h={height_frac:.2f}"
+            self.depth_debug = f"{self.depth_source}:bad_bbox:w={width_frac:.2f},h={height_frac:.2f}"
             return None
 
         xs = xs_roi
@@ -641,7 +657,7 @@ class AlgSolution:
             "height_frac": height_frac,
         }
         self.depth_box = estimate
-        self.depth_debug = "ok"
+        self.depth_debug = f"{self.depth_source}:ok"
         return estimate
 
     def _box_centered_from_depth(self, obs) -> bool:
