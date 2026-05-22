@@ -339,18 +339,6 @@ class AlgSolution:
         assumptions with LiDAR bearing changes so phase decisions can target the
         box pose instead of relying only on fixed step counts.
         """
-        if self.depth_box is not None:
-            # Depth bbox is trusted only when it covers a plausible object-sized
-            # region. It gives image-space centering, not full world pose.
-            depth_bearing = 0.65 * self.depth_box["x_error"]
-            depth_range = self.depth_box["distance"]
-            if 0.35 <= depth_range <= 3.2:
-                bearing_world = self.est_yaw + depth_bearing
-                depth_x = self.est_x + math.cos(bearing_world) * depth_range
-                depth_y = self.est_y + math.sin(bearing_world) * depth_range
-                self.box_est_x = 0.90 * self.box_est_x + 0.10 * depth_x
-                self.box_est_y = 0.88 * self.box_est_y + 0.12 * depth_y
-
         if self.lidar_box is not None and self.lidar_box["range"] <= 2.6 and self.lidar_box["count"] >= 12:
             bearing = self.lidar_box["bearing"]
             # Avoid fusing side/back wall-like clusters as box position. During
@@ -397,7 +385,7 @@ class AlgSolution:
         return self.box_est_x >= self.BOX_PRE_ROTATE_TARGET_X or self.est_x >= self.SIDE_PUSH_START_X
 
     def _box_rotation_ready(self) -> bool:
-        yaw_ready = self.box_est_yaw <= self.BOX_ROTATE_TARGET_YAW + 0.10
+        yaw_ready = self.box_est_yaw <= -0.75
         confidence_ready = self.box_yaw_confidence >= 0.35
         return self._rotate_elapsed_steps() >= self.ROTATE_BOX_MIN_STEPS and yaw_ready and confidence_ready
 
@@ -450,7 +438,7 @@ class AlgSolution:
     def _bridge_pose_ready(self) -> bool:
         """Only allow crossing when the estimated box pose can plausibly bridge the hole."""
         y_ready = abs(self.box_est_y - self.BOX_INSERT_TARGET_Y) <= self.BOX_INSERT_Y_TOL
-        yaw_ready = self.box_est_yaw <= self.BOX_ROTATE_TARGET_YAW + 0.12
+        yaw_ready = self.box_est_yaw <= -0.75
         confidence_ready = self.box_yaw_confidence >= 0.35
         x_ready = self.box_est_x >= -0.85
         return y_ready and yaw_ready and confidence_ready and x_ready
@@ -565,12 +553,7 @@ class AlgSolution:
         return abs(estimate["x_error"]) < 0.16 and estimate["distance"] < 3.0
 
     def _depth_corrected_lateral_cmd(self, obs, base_lin_y: float, gain: float = 0.35) -> float:
-        estimate = self.depth_box
-        if estimate is None:
-            return base_lin_y
-        # Negative image error means the box appears left; command +Y to move left.
-        corrected = base_lin_y - gain * estimate["x_error"]
-        return float(max(-0.55, min(0.55, corrected)))
+        return base_lin_y
 
     def _get_lidar_scan(self, obs):
         """Return the flattened Task D LiDAR observation from obs['extero']."""
@@ -756,7 +739,7 @@ class AlgSolution:
         action_dim = (int(proprio.shape[-1]) - 12) // 3
         self._update_pose_estimate(proprio)
         self._update_stuck_counter()
-        self._estimate_box_from_depth(obs)
+        self.depth_box = None
         self._estimate_box_from_lidar(obs)
         self._update_box_pose_model()
 
@@ -769,7 +752,6 @@ class AlgSolution:
         elif self.phase == "CONTACT_BOX" and (
             self.est_x >= self.CONTACT_TARGET_X
             or self.contact_ticks >= 20
-            or (self.depth_box is not None and self.depth_box["distance"] <= 1.05)
         ):
             self.phase = "PUSH_BOX"
             self.step = 0
@@ -821,11 +803,6 @@ class AlgSolution:
                 self.phase = "ALIGN_BEHIND_ROTATED_BOX"
             else:
                 self.phase = "MOVE_FORWARD_BESIDE_BOX" if self._at_rotate_lane() else "MOVE_LEFT_OF_BOX"
-            self.step = 0
-        elif self.phase == "ROTATE_BOX_RIGHT" and not self._at_rotate_lane():
-            self.phase = "MOVE_LEFT_OF_BOX"
-            self.rotate_no_progress_ticks = 0
-            self.rotate_release_ticks = 0
             self.step = 0
         elif self.phase == "ROTATE_BOX_RIGHT" and self._box_rotation_ready():
             self.phase = "ALIGN_BEHIND_ROTATED_BOX"
@@ -972,7 +949,11 @@ class AlgSolution:
         """Short push pulse using the active rotate primitive."""
         yaw_cmd = float(max(-0.35, min(0.35, -1.6 * self.est_yaw)))
         strategy = self._rotate_strategy_name()
-        if strategy in ("LEFT_CORNER_CW", "SIDE_SWEEP") and not self._at_rotate_lane():
+        if (
+            strategy in ("LEFT_CORNER_CW", "SIDE_SWEEP")
+            and not self._at_rotate_lane()
+            and self.step == 0
+        ):
             self._set_velocity_command(-0.25, 0.75, yaw_cmd)
             return self._compute_base_action(obs, action_dim)
 
