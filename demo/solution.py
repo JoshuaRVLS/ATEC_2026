@@ -123,6 +123,7 @@ class AlgSolution:
         self.MAX_INSERT_ATTEMPTS = 4
         self.current_score = 0.0
         self.depth_box = None
+        self.depth_debug = None
         self.lidar_box = None
         self.prev_lidar_bearing = None
         self.prev_lidar_range = None
@@ -304,7 +305,7 @@ class AlgSolution:
                 f"yaw_conf={self.box_yaw_confidence:.2f} sensor_conf={self.box_sensor_confidence:.2f} "
                 f"bridge_ready={self.bridge_ready} insert_attempts={self.insert_attempts} "
                 f"rotate_pulses={self.rotate_pulse_count} rotate_strategy={self._rotate_strategy_name()} "
-                f"depth_box={self.depth_box} lidar_box={self.lidar_box}"
+                f"depth_box={self.depth_box} depth_debug={self.depth_debug} lidar_box={self.lidar_box}"
             )
             self._last_logged_phase = self.phase
 
@@ -567,58 +568,57 @@ class AlgSolution:
         return depth
 
     def _estimate_box_from_depth(self, obs):
-        """Estimate a plausible box bbox from head depth.
-
-        The old detector accepted almost the whole image as "box" when depth was
-        flat. This version requires an object-sized connected projection: enough
-        near pixels, but not a full-frame mask.
-        """
+        """Estimate a plausible box bbox from head depth."""
         depth = self._get_depth_image(obs)
         if depth is None:
             self.depth_box = None
+            self.depth_debug = "no_depth"
             return None
 
         height, width = depth.shape
-        row0, row1 = int(height * 0.30), int(height * 0.88)
-        col0, col1 = int(width * 0.08), int(width * 0.92)
+        row0, row1 = int(height * 0.22), int(height * 0.92)
+        col0, col1 = int(width * 0.04), int(width * 0.96)
         roi = depth[row0:row1, col0:col1]
 
         valid = torch.isfinite(roi) & (roi > 0.15) & (roi < 5.0)
         valid_depth = roi[valid]
         if valid_depth.numel() < 200:
             self.depth_box = None
+            self.depth_debug = f"few_valid:{int(valid_depth.numel())}"
             return None
 
-        # The box should be one of the nearest large objects in the head camera,
-        # but not the entire floor/platform.
         flat = valid_depth.flatten()
-        kth = max(1, int(flat.numel() * 0.18))
-        near_depth = torch.kthvalue(flat, kth).values + 0.25
+        q08 = torch.kthvalue(flat, max(1, int(flat.numel() * 0.08))).values
+        q25 = torch.kthvalue(flat, max(1, int(flat.numel() * 0.25))).values
+        near_depth = torch.minimum(q08 + 0.55, q25 + 0.25)
         near_mask = valid & (roi <= near_depth)
+
+        # Remove isolated rows/cols and keep the largest dense rectangular blob.
+        for _ in range(2):
+            row_counts = near_mask.sum(dim=1)
+            col_counts = near_mask.sum(dim=0)
+            row_keep = row_counts > max(4, int(0.012 * near_mask.shape[1]))
+            col_keep = col_counts > max(4, int(0.012 * near_mask.shape[0]))
+            near_mask = near_mask & row_keep[:, None] & col_keep[None, :]
+
         near_pixels = int(near_mask.sum().item())
         roi_pixels = int(roi.numel())
         area_frac = float(near_pixels) / float(max(1, roi_pixels))
-        if near_pixels < 120 or area_frac > 0.55:
+        if near_pixels < 80 or area_frac > 0.65:
             self.depth_box = None
+            self.depth_debug = f"bad_area:pixels={near_pixels},area={area_frac:.3f},near={float(near_depth.item()):.2f}"
             return None
 
         ys_roi, xs_roi = torch.where(near_mask)
-        row_counts = near_mask.sum(dim=1)
-        col_counts = near_mask.sum(dim=0)
-        row_keep = row_counts > max(3, int(0.025 * near_mask.shape[1]))
-        col_keep = col_counts > max(3, int(0.025 * near_mask.shape[0]))
-        if row_keep.sum().item() < 5 or col_keep.sum().item() < 5:
-            self.depth_box = None
-            return None
-
-        rows = torch.where(row_keep)[0]
-        cols = torch.where(col_keep)[0]
+        rows = torch.unique(ys_roi)
+        cols = torch.unique(xs_roi)
         bbox_h = int(rows[-1].item() - rows[0].item() + 1)
         bbox_w = int(cols[-1].item() - cols[0].item() + 1)
         width_frac = float(bbox_w) / float(max(1, near_mask.shape[1]))
         height_frac = float(bbox_h) / float(max(1, near_mask.shape[0]))
-        if width_frac < 0.04 or height_frac < 0.06 or width_frac > 0.85 or height_frac > 0.90:
+        if width_frac < 0.025 or height_frac < 0.035 or width_frac > 0.95 or height_frac > 0.95:
             self.depth_box = None
+            self.depth_debug = f"bad_bbox:w={width_frac:.2f},h={height_frac:.2f}"
             return None
 
         xs = xs_roi
@@ -641,6 +641,7 @@ class AlgSolution:
             "height_frac": height_frac,
         }
         self.depth_box = estimate
+        self.depth_debug = "ok"
         return estimate
 
     def _box_centered_from_depth(self, obs) -> bool:
