@@ -888,6 +888,15 @@ class AlgSolution:
         elif self.phase == "MOVE_FORWARD_BESIDE_BOX" and (
             (self._at_rotate_x_position() or self.step >= 360)
             and self._at_rotate_lane()
+            and not self._box_y_centered_for_rotation()
+        ):
+            self.center_box_done = False
+            self.phase = "MOVE_LEFT_OF_BOX"
+            self.step = 0
+        elif self.phase == "MOVE_FORWARD_BESIDE_BOX" and (
+            (self._at_rotate_x_position() or self.step >= 360)
+            and self._at_rotate_lane()
+            and self._box_y_centered_for_rotation()
         ):
             self.phase = "ROTATE_BOX_RIGHT"
             self.rotate_no_progress_ticks = 0
