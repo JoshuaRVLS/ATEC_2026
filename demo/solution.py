@@ -353,7 +353,7 @@ class AlgSolution:
             return False
 
         jump = math.hypot(cand_x - self.box_est_x, cand_y - self.box_est_y)
-        if self.box_sensor_confidence > 0.30 and jump > max_jump:
+        if jump > max_jump:
             return False
 
         alpha = float(max(0.04, min(0.35, confidence)))
@@ -404,7 +404,7 @@ class AlgSolution:
         allow_lidar_position_update = (
             not self.center_box_done
             and self.box_yaw_confidence < 0.35
-            and self.phase not in ("CENTER_BOX_Y", "ROTATE_BOX_RIGHT", "ROTATE_RELEASE_OBSERVE", "ALIGN_BEHIND_ROTATED_BOX")
+            and self.phase in ("MOVE_LEFT_TO_BOX_LANE", "CONTACT_BOX")
         )
         if (
             allow_lidar_position_update
@@ -430,7 +430,7 @@ class AlgSolution:
             self.box_est_x = max(self.box_est_x, min(observed_x, self.BOX_PRE_ROTATE_TARGET_X + 0.18))
             self.box_est_y = 0.92 * self.box_est_y + 0.08 * observed_y
 
-        elif self.phase == "MOVE_FORWARD_BESIDE_BOX":
+        elif self.phase == "MOVE_FORWARD_BESIDE_BOX" and not self.center_box_done:
             self.box_est_y = 0.96 * self.box_est_y + 0.04 * (self.est_y - 0.85)
 
         elif self.phase == "CENTER_BOX_Y":
