@@ -72,7 +72,7 @@ class AlgSolution:
         self.est_yaw = 0.0
         self.BACK_UP_TARGET_X = -3.55
         self.BOX_LANE_Y = 1.55
-        self.CONTACT_TARGET_X = -3.08
+        self.CONTACT_TARGET_X = -3.72
         self.SIDE_PUSH_START_X = -1.55
         self.BOX_PRE_ROTATE_TARGET_X = -1.55
         self.BOX_INSERT_TARGET_Y = 1.12
@@ -764,8 +764,11 @@ class AlgSolution:
         elif self.phase == "CONTACT_BOX" and (
             self.est_x >= self.CONTACT_TARGET_X
             or self.contact_ticks >= 20
+            or self.step >= 70
         ):
-            self.phase = "PUSH_BOX"
+            self.phase = "DETACH_FROM_BOX"
+            self.detach_start_x = self.est_x
+            self.rotation_session_active = False
             self.step = 0
         elif self.phase == "PUSH_BOX" and (self._box_x_ready_for_rotation() or self.stuck_ticks >= 25):
             self.phase = "DETACH_FROM_BOX"
@@ -925,11 +928,11 @@ class AlgSolution:
         return self._compute_base_action(obs, action_dim)
 
     def _contact_box_action(self, obs, action_dim: int) -> torch.Tensor:
-        """Creep forward to make contact before the strong push phase."""
+        """Creep forward only enough to touch/locate the box before side setup."""
         lin_y = self._depth_corrected_lateral_cmd(obs, base_lin_y=0.0, gain=0.30)
         lin_y = self._lidar_corrected_lateral_cmd(lin_y, gain=0.12)
         yaw_cmd = float(max(-0.30, min(0.30, -1.2 * self.est_yaw)))
-        self._set_velocity_command(0.60, lin_y, yaw_cmd)
+        self._set_velocity_command(0.35, lin_y, yaw_cmd)
         return self._compute_base_action(obs, action_dim)
     
     def _push_box_action(self, obs, action_dim: int) -> torch.Tensor:
