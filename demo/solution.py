@@ -830,6 +830,14 @@ class AlgSolution:
         """Run policy inference and return current-env full-body action."""
         # if current_score > 1:
         #     return {'action': [], 'giveup': True}
+
+        if not hasattr(self, "_printed_obs_keys"):
+            print("OBS KEYS:", obs.keys())
+            if "image" in obs:
+                print("IMAGE KEYS:", obs["image"].keys())
+                for k, v in obs["image"].items():
+                    print(k, type(v), getattr(v, "shape", None), getattr(v, "dtype", None))
+            self._printed_obs_keys = True
         
         self.current_score = float(current_score)
         proprio = obs["proprio"].to(self.device)
