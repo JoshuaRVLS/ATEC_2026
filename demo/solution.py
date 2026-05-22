@@ -77,6 +77,9 @@ class AlgSolution:
         self.BOX_PRE_ROTATE_TARGET_X = -1.55
         self.BOX_INSERT_TARGET_Y = 1.12
         self.BOX_INSERT_Y_TOL = 0.08
+        self.CENTER_BOX_Y_TOL = 0.12
+        self.CENTER_BOX_MIN_STEPS = 110
+        self.CENTER_BOX_MAX_STEPS = 300
         self.BOX_EST_Y_MIN = 0.65
         self.BOX_EST_Y_MAX = 2.05
         self.BOX_ROTATE_TARGET_YAW = -1.35
@@ -360,6 +363,12 @@ class AlgSolution:
         elif self.phase == "MOVE_FORWARD_BESIDE_BOX":
             self.box_est_y = 0.96 * self.box_est_y + 0.04 * (self.est_y - 0.85)
 
+        elif self.phase == "CENTER_BOX_Y":
+            # While pushing from the +Y side, model the box sliding toward the
+            # hole center. This keeps the next rotation away from the pit edge.
+            y_error = self.box_est_y - self.BOX_INSERT_TARGET_Y
+            self.box_est_y -= max(-0.0025, min(0.0055, 0.005 * y_error))
+
         elif self.phase == "ROTATE_BOX_RIGHT":
             yaw_before = self.box_est_yaw
             sensor_rotation = self._lidar_rotation_progress()
@@ -383,6 +392,9 @@ class AlgSolution:
 
     def _box_x_ready_for_rotation(self) -> bool:
         return self.box_est_x >= self.BOX_PRE_ROTATE_TARGET_X or self.est_x >= self.SIDE_PUSH_START_X
+
+    def _box_y_centered_for_rotation(self) -> bool:
+        return abs(self.box_est_y - self.BOX_INSERT_TARGET_Y) <= self.CENTER_BOX_Y_TOL
 
     def _box_rotation_ready(self) -> bool:
         yaw_ready = self.box_est_yaw <= -0.75
@@ -769,6 +781,12 @@ class AlgSolution:
             self.detach_start_x = None
             self.step = 0
         elif self.phase == "MOVE_LEFT_OF_BOX" and self.est_y >= self.BOX_LEFT_SIDE_Y:
+            self.phase = "CENTER_BOX_Y"
+            self.step = 0
+        elif self.phase == "CENTER_BOX_Y" and (
+            (self.step >= self.CENTER_BOX_MIN_STEPS and self._box_y_centered_for_rotation())
+            or self.step >= self.CENTER_BOX_MAX_STEPS
+        ):
             self.phase = "MOVE_FORWARD_BESIDE_BOX"
             self.step = 0
         elif self.phase == "MOVE_FORWARD_BESIDE_BOX" and (
@@ -871,6 +889,8 @@ class AlgSolution:
             action = self._detach_from_box_action(obs, action_dim)
         elif self.phase == "MOVE_LEFT_OF_BOX":
             action = self._move_left_of_box_action(obs, action_dim)
+        elif self.phase == "CENTER_BOX_Y":
+            action = self._center_box_y_action(obs, action_dim)
         elif self.phase == "MOVE_FORWARD_BESIDE_BOX":
             action = self._move_forward_beside_box_action(obs, action_dim)
         elif self.phase == "ROTATE_BOX_RIGHT":
@@ -932,6 +952,29 @@ class AlgSolution:
         yaw_cmd = float(max(-0.30, min(0.30, -1.2 * self.est_yaw)))
         self._set_velocity_command(-0.05, 0.75, yaw_cmd)
         return self._compute_base_action(obs, action_dim)
+
+    def _center_box_y_action(self, obs, action_dim: int) -> torch.Tensor:
+        """Push the box toward the hole's Y center before rotating it."""
+        yaw_cmd = float(max(-0.35, min(0.35, -1.5 * self.est_yaw)))
+        y_error = self.box_est_y - self.BOX_INSERT_TARGET_Y
+
+        # Stay on the +Y side first. If the robot is too low, sliding right will
+        # miss the box and just move the robot around the pit.
+        if self.est_y < self.BOX_LEFT_SIDE_Y - 0.15:
+            self._set_velocity_command(-0.05, 0.70, yaw_cmd)
+            return self._compute_base_action(obs, action_dim)
+
+        # Positive y_error means the box is left/high of the hole center, so the
+        # robot pushes it right/down in -Y while keeping slight forward contact.
+        if y_error > self.CENTER_BOX_Y_TOL:
+            lin_y = -0.85
+        elif y_error < -self.CENTER_BOX_Y_TOL:
+            lin_y = 0.25
+        else:
+            lin_y = -0.20
+        self._set_velocity_command(0.12, lin_y, yaw_cmd)
+        base_action = self._compute_base_action(obs, action_dim)
+        return torch.clamp(base_action, -1.0, 1.0)
 
     def _move_forward_beside_box_action(self, obs, action_dim: int) -> torch.Tensor:
         """Move forward on the left side until reaching an off-center rotate point."""
