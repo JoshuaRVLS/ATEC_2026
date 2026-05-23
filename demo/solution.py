@@ -240,12 +240,16 @@ class AlgSolution:
                 self.step = 0
 
         elif p == "PUSH_RIGHT":
-            if rx >= -2.8 or s >= self.PUSH_RIGHT_STEPS:
+            # Push box in +X direction. Must push until box is well past the pit entry.
+            # Transition when robot X >= -1.5 (box pushed far enough)
+            if rx >= -1.5 or s >= self.PUSH_RIGHT_STEPS:
                 self.phase = "BACK_SIDE"
                 self.step = 0
 
         elif p == "BACK_SIDE":
-            if ry <= self.BOX_Y - 0.3 or s >= self.BACK_SIDE_STEPS:
+            # Move to y < 1.0 (behind the box, on the other side)
+            # Only transition when robot is truly behind the box
+            if ry <= 1.0 or s >= self.BACK_SIDE_STEPS:
                 self.phase = "PUSH_PIT"
                 self.step = 0
 
