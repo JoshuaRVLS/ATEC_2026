@@ -85,39 +85,56 @@ class AlgSolution:
         try:
             extero = obs.get("extero") or obs.get("proprio")
             if extero is None:
+                print("[DEBUG] _cache_env: no extero or proprio in obs")
                 return
             manager = getattr(extero, "_manager", None)
             if manager is None:
+                print("[DEBUG] _cache_env: no _manager attribute on tensor")
                 return
-            self._env_cache = manager
+            env = getattr(manager, "_env", None)
+            if env is None:
+                print("[DEBUG] _cache_env: manager has no _env")
+                return
+            scene = getattr(env, "scene", None)
+            if scene is None:
+                print("[DEBUG] _cache_env: env has no scene")
+                return
+            robot_keys = list(scene.keys()) if hasattr(scene, "keys") else []
+            print(f"[DEBUG] _cache_env: scene keys={robot_keys}")
+            self._env_cache = env
             self._gt_cached = True
             # Initialize from GT
             gt = self._get_gt_robot_pose()
             if gt:
+                print(f"[DEBUG] _cache_env: initial GT robot={gt}")
                 self._prev_x, self._prev_y = gt[0], gt[1]
-        except Exception:
-            self._gt_cached = False
+        except Exception as e:
+            print(f"[DEBUG] _cache_env EXCEPTION: {type(e).__name__}: {e}")
 
     def _get_gt_robot_pose(self):
         try:
             if self._env_cache is None:
                 return None
-            robot = self._env_cache._env.scene["robot"]
+            scene = self._env_cache.scene if hasattr(self._env_cache, "scene") else self._env_cache
+            robot = scene["robot"]
             pos = robot.data.root_pos_w[0].cpu().numpy()
             quat = robot.data.root_quat_w[0].cpu().numpy()
             yaw = math.atan2(2.0*(quat[0]*quat[3] + quat[1]*quat[2]), 1.0 - 2.0*(quat[1]**2 + quat[2]**2))
             return float(pos[0]), float(pos[1]), float(yaw)
-        except Exception:
+        except Exception as e:
+            print(f"[DEBUG] _get_gt_robot_pose EXCEPTION: {e}")
             return None
 
     def _get_gt_box_pose(self):
         try:
             if self._env_cache is None:
                 return None
-            box = self._env_cache._env.scene["box"]
+            scene = self._env_cache.scene if hasattr(self._env_cache, "scene") else self._env_cache
+            box = scene["box"]
             pos = box.data.root_pos_w[0].cpu().numpy()
             return float(pos[0]), float(pos[1])
-        except Exception:
+        except Exception as e:
+            print(f"[DEBUG] _get_gt_box_pose EXCEPTION: {e}")
             return None
 
     # ── Policy interface ─────────────────────────────────────────────────────
@@ -282,10 +299,12 @@ class AlgSolution:
 
         proprio = obs["proprio"].to(self.device)
         action_dim = (int(proprio.shape[-1]) - 12) // 3
+        print(f"[DEBUG] proprio shape={proprio.shape}, action_dim={action_dim}")
 
         self._cache_env(obs)
         robot_pose = self._get_gt_robot_pose()
         box_pose = self._get_gt_box_pose()
+        print(f"[DEBUG] GT robot={robot_pose}, box={box_pose}, cache_ok={self._gt_cached}")
 
         self._transition(robot_pose, box_pose)
 
@@ -293,7 +312,6 @@ class AlgSolution:
 
         # Velocity commands per phase
         if p == "TO_BOX":
-            # Forward + LEFT (positive Y) to reach box's Y position
             action = self._action(obs, action_dim, lin_x=0.5, lin_y=0.6, ang_z=0.0)
         elif p == "CONTACT":
             action = self._action(obs, action_dim, lin_x=0.5, lin_y=0.0, ang_z=0.0)
