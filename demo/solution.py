@@ -80,7 +80,7 @@ class AlgSolution:
         # ── Step limits per phase (fallback) ───────────────────────────────
         self.BACK_STEPS = 800
         self.LEFT_STEPS = 600
-        self.PUSH_RIGHT_STEPS = 1000  # push farther to get box near pit
+        self.PUSH_RIGHT_STEPS = 1500  # push longer to get box to pit
         self.BACK_SIDE_STEPS = 600
         self.PUSH_PIT_STEPS = 700
         self.CROSS_STEPS = 500
@@ -253,6 +253,10 @@ class AlgSolution:
         bearing = self.lidar_box['bearing']   # radians from robot forward
         rng = self.lidar_box['range']         # meters to box
 
+        # Clamp range to reasonable bounds (box is 0.8m wide, ~1m away when pushing)
+        if rng < 0.5 or rng > 5.0:
+            return None
+
         # Robot frame: +X = forward, +Y = left
         # Bearing=0 means box is straight ahead (+X in robot frame)
         # Bearing=+π/2 means box is to the LEFT (+Y in robot frame)
@@ -326,13 +330,13 @@ class AlgSolution:
                 self.phase = "BACK_SIDE"
                 self.step = 0
                 return
-            # Box moved enough in X? (box_x >= -0.5 means near pit entrance)
-            if self.est_box_x is not None and self.est_box_x >= -0.5:
+            # Box moved enough in X? Lower threshold to -1.5 to account for drift
+            if self.est_box_x is not None and self.est_box_x >= -1.5:
                 self.phase = "BACK_SIDE"
                 self.step = 0
                 return
-            # Fallback: step limit
-            if s >= self.PUSH_RIGHT_STEPS:
+            # Fallback: step limit (increased)
+            if s >= 1500:
                 self.phase = "BACK_SIDE"
                 self.step = 0
                 return
@@ -460,16 +464,22 @@ class AlgSolution:
         elif p == "PUSH_RIGHT":
             self._vel_x = 0.8   # moderate forward
             self._vel_y = 0.0
-            # Force heading toward +X (0.0) to push in world +X direction
             self._vel_z = 0.0
         elif p == "BACK_SIDE":
+            # If box is near pit (box_x > -1.5), stay closer to box
+            # Otherwise, go to y < box_y - 0.3 (south of box)
+            if self.est_box_x is not None and self.est_box_x > -1.5:
+                # Box already pushed far, don't go too far south
+                target_y = 1.0
+            else:
+                target_y = self.BOX_Y - 0.3
             self._vel_x = 0.0
-            self._vel_y = -1.0  # fast strafe right
+            self._vel_y = -1.0 if self.est_y > target_y else 0.0  # strafe right if above target
             self._vel_z = 0.0
         elif p == "PUSH_PIT":
             self._vel_x = 0.8
             self._vel_y = 0.0
-            self._vel_z = 0.0   # keep facing +X
+            self._vel_z = 0.0
         elif p == "CROSS":
             self._vel_x = 0.8
             self._vel_y = 0.0
