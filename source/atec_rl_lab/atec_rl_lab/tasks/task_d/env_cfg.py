@@ -129,6 +129,9 @@ class TaskDEnvCfg(BaseEnvCfg):
         self.events.physics_material = None
         self.events.base_external_force_torque = None
 
+        # Disable image observations for Task D (cameras not used, avoids init crash)
+        self.observations.image = None
+
         # Trun off terminations
         self.terminations.illegal_contact = None
         self.terminations.fall.params["minimum_height"] = 0.25
