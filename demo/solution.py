@@ -97,18 +97,26 @@ class AlgSolution:
     # ══════════════════════════════════════════════════════════════════════════
 
     def _update_pose(self, proprio: torch.Tensor) -> None:
-        """Integrate robot position from base_lin_vel."""
+        """Integrate robot position from base_lin_vel (BODY frame convention).
+
+        base_lin_vel is in body frame: vx_body=forward/backward, vy_body=left/right.
+        Rotate to world frame using current yaw to accumulate world position.
+        This matches the velocity command convention where vel_y=+left.
+        """
         base_lin = proprio[0, 0:3].cpu().numpy()
         base_ang = proprio[0, 3:6].cpu().numpy()
-        vx, vy = base_lin[0], base_lin[1]
+        vx_body, vy_body = base_lin[0], base_lin[1]
         yaw_rate = base_ang[2]
 
         cos_y = math.cos(self.est_yaw)
         sin_y = math.sin(self.est_yaw)
 
-        # World frame integration
-        self.est_x += (cos_y * vx - sin_y * vy) * self._dt
-        self.est_y += (sin_y * vx + cos_y * vy) * self._dt
+        # Body-to-world rotation (yaw only, robot stays upright)
+        world_vx = cos_y * vx_body - sin_y * vy_body
+        world_vy = sin_y * vx_body + cos_y * vy_body
+
+        self.est_x += world_vx * self._dt
+        self.est_y += world_vy * self._dt
         self.est_yaw += yaw_rate * self._dt
 
         while self.est_yaw > math.pi:  self.est_yaw -= 2 * math.pi
@@ -347,35 +355,42 @@ class AlgSolution:
 
         # ── Velocity command per phase ────────────────────────────────────
         # vel_x = forward speed in +X world, vel_y = strafe (+=left, -=right)
+        # heading_command=True → command[2] = TARGET HEADING in world frame
+        # Robot will rotate to achieve target heading while moving
         if p == "BACK":
             self._vel_x = -1.0  # fast backward
             self._vel_y = 0.0
+            self._vel_z = 0.0   # no heading target during back
         elif p == "LEFT":
             self._vel_x = 0.0
             self._vel_y = 1.0   # fast strafe left
+            self._vel_z = 0.0   # maintain current heading
         elif p == "PUSH_RIGHT":
-            self._vel_x = 1.0   # fast forward
+            self._vel_x = 0.8   # moderate forward
             self._vel_y = 0.0
+            # Force heading toward +X (0.0) to push in world +X direction
+            self._vel_z = 0.0
         elif p == "BACK_SIDE":
             self._vel_x = 0.0
             self._vel_y = -1.0  # fast strafe right
+            self._vel_z = 0.0
         elif p == "PUSH_PIT":
-            self._vel_x = 1.0
+            self._vel_x = 0.8
             self._vel_y = 0.0
+            self._vel_z = 0.0   # keep facing +X
         elif p == "CROSS":
             self._vel_x = 0.8
             self._vel_y = 0.0
-        self._vel_z = 0.0
+            self._vel_z = 0.0
 
         action = self._run_policy(obs, action_dim)
 
         # ── Log ──────────────────────────────────────────────────────────
         if p != self._last_phase:
             lb_str = (f"rng={lb['range']:.2f}" if lb else "none")
-            hdg_deg = f"{math.degrees(self._vel_y):+.0f}°"
             print(
-                f"[D] phase={p:<12}  robot=({self.est_x:+.2f},{self.est_y:+.2f})  "
-                f"lidar=[{lb_str}]  cmd=(fwd={self._vel_x:+.1f}, hdg={hdg_deg})"
+                f"[D] phase={p:<12}  robot=({self.est_x:+.2f},{self.est_y:+.2f},{math.degrees(self.est_yaw):+.0f}°)  "
+                f"lidar=[{lb_str}]  cmd=(fwd={self._vel_x:+.1f}, str={self._vel_y:+.1f}, hdg={self._vel_z:+.2f})"
             )
             self._last_phase = p
 
