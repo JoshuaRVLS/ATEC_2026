@@ -88,11 +88,9 @@ class AlgSolution:
         # ── LiDAR ────────────────────────────────────────────────────────────
         self.lidar_box = None
 
-        # ── Box estimator (from LiDAR) ─────────────────────────────────────
-        self.est_box_x = None   # estimated box X in world frame
-        self.est_box_y = None   # estimated box Y in world frame
-        self._prev_lidar_range = None
-        self._box_stuck_counter = 0
+                # ── Score tracking ─────────────────────────────────────────────────
+        self._prev_score = 0
+        self._score_stalled_counter = 0
 
         # ── Diagnostic ─────────────────────────────────────────────────────
         self._last_phase = None
@@ -324,38 +322,28 @@ class AlgSolution:
                 self.step = 0
 
         elif p == "PUSH_RIGHT":
-            # Use BOX position (from LiDAR) instead of robot position
-            # Box reached pit zone? Check every step
+            # KEEP PUSHING until box is IN PIT
+            # Only transition when box actually reaches pit zone
             if self._is_box_in_pit():
                 self.phase = "BACK_SIDE"
                 self.step = 0
                 return
-            # Box moved enough in X? Lower threshold to -1.5 to account for drift
-            if self.est_box_x is not None and self.est_box_x >= -1.5:
-                self.phase = "BACK_SIDE"
-                self.step = 0
-                return
-            # Fallback: step limit (increased)
-            if s >= 1500:
+            # Also transition if robot has walked past the box (box behind robot)
+            if self.est_box_x is not None and self.est_x > self.est_box_x + 1.5:
                 self.phase = "BACK_SIDE"
                 self.step = 0
                 return
 
         elif p == "BACK_SIDE":
-            # Use robot position to move to left side of box
-            # Stay at y < box_y - 0.3 (south of box)
-            if ry <= self.BOX_Y - 0.3 or s >= self.BACK_SIDE_STEPS:
+            # Move to y < box_y (south of box) for second push
+            if ry <= self.BOX_Y - 0.2 or s >= self.BACK_SIDE_STEPS:
                 self.phase = "PUSH_PIT"
                 self.step = 0
 
         elif p == "PUSH_PIT":
-            # Check if box is in pit (primary condition)
+            # KEEP PUSHING until box is IN PIT
+            # Only transition when box actually reaches pit zone
             if self._is_box_in_pit():
-                self.phase = "CROSS"
-                self.step = 0
-                return
-            # Fallback: robot reached X threshold
-            if rx >= self.PIT_X or s >= self.PUSH_PIT_STEPS:
                 self.phase = "CROSS"
                 self.step = 0
                 return
@@ -487,16 +475,14 @@ class AlgSolution:
 
         action = self._run_policy(obs, action_dim)
 
-        # ── Log (every 50 steps for detail) ─────────────────────────────────
-        if self.step % 50 == 0:
-            lb_str = (f"rng={lb['range']:.2f}" if lb else "none")
-            bx_str = (f"box=({self.est_box_x:+.2f},{self.est_box_y:+.2f})" if self.est_box_x is not None else "box=unk")
-            in_pit = "✓PIT" if self._is_box_in_pit() else ""
-            stuck = "⚠STUCK" if self._is_box_stuck() else ""
-            print(
-                f"[D] {p:<12} | step={self.step:<4} | robot=({self.est_x:+.2f},{self.est_y:+.2f},{math.degrees(self.est_yaw):+.0f}°) | "
-                f"{bx_str} | lidar=[{lb_str}] | {in_pit}{stuck}"
-            )
+        # ── Log (every step) ──────────────────────────────────────────────────
+        lb_str = (f"rng={lb['range']:.2f}" if lb else "none")
+        bx_str = (f"box=({self.est_box_x:+.2f},{self.est_box_y:+.2f})" if self.est_box_x is not None else "box=unk")
+        in_pit = "✓PIT" if self._is_box_in_pit() else ""
+        print(
+            f"[D] {p:<12} | {self.step:<4} | robot=({self.est_x:+.2f},{self.est_y:+.2f},{math.degrees(self.est_yaw):+.0f}°) | "
+            f"{bx_str} | {lb_str} | {in_pit}"
+        )
 
         self.step += 1
         return {"action": action.cpu().numpy().tolist(), "giveup": False}
