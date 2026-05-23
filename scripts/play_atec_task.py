@@ -147,6 +147,16 @@ def play() -> tuple[float, float]:
 
             done = (terminated.item() or truncated.item())
             if done:
+                print(f"[TERM] terminated={terminated.item()} truncated={truncated.item()}")
+                print(f"[TERM] step={timestep} elapsed={total_elapsed_time:.2f}s")
+                if isinstance(info, dict):
+                    print(f"[TERM] info keys={list(info.keys())}")
+                    log = info.get("log")
+                    if log is not None:
+                        print(f"[TERM] log keys={list(log.keys())}")
+                        for k, v in log.items():
+                            val = v.item() if hasattr(v, 'item') else float(v)
+                            print(f"  {k} = {val}")
                 break
 
             timestep += 1

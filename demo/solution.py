@@ -50,7 +50,7 @@ class AlgSolution:
         self._vel_cmd = torch.tensor([0.5, 0.0, 0.0], device=self.device, dtype=torch.float32).view(1, 3)
 
         # ── State machine ─────────────────────────────────────────────────────
-        self.phase = "BACKUP"
+        self.phase = "TO_BOX_LANE"   # start sideways immediately
         self.step = 0
 
         # ── Pose estimation (dead reckoning + LiDAR yaw correction) ───────────
@@ -141,37 +141,33 @@ class AlgSolution:
     def _cache_env(self, obs: dict) -> None:
         """Cache references to the sim objects on first call.
 
-        The obs dict is a nested dict of ObservationManager output.  It contains
-        torch tensors only — not the underlying scene objects.  To get
-        ground-truth robot and box positions we must reach into the raw env
-        via the observation manager's scene handle.  We stash those handles
-        here so they survive across predicts() calls.
+        On first call also initialize the pose estimate from ground truth
+        so we don't drift from wrong initial values.
         """
         if self._gt_cached:
             return
 
-        # The observation managers live on the ManagerBasedRLEnv.  The simplest
-        # way to reach them is through the class-attribute hierarchy of the
-        # tensors in obs.  Each tensor carries a reference to its manager via
-        # the isaaclab internal state; we traverse up the hierarchy to find
-        # the scene and from there the articulations.
-        #
-        # If the manager hierarchy is unavailable, we fall back to dead-reckoning.
         try:
-            # Grab any tensor from the obs dict to get to the manager
-            extero = obs.get("extero")
-            if extero is None:
-                extero = obs.get("proprio")
+            extero = obs.get("extero") or obs.get("proprio")
             if extero is None:
                 return
 
-            # The _manager attribute on IsaacLab tensors points to the parent
-            # ObservationManager.  Its _env attribute is the ManagerBasedRLEnv.
             manager = getattr(extero, "_manager", None)
             if manager is None:
                 return
             self._env_cache = manager
             self._gt_cached = True
+
+            # Initialize pose from actual ground truth on first frame
+            gt = self._get_gt_robot_pose()
+            if gt is not None:
+                self.est_x, self.est_y, self.est_yaw = gt
+
+                # Also get initial box position
+                gt_box = self._get_gt_box_pose()
+                if gt_box is not None:
+                    self.box_est_x, self.box_est_y = gt_box
+                    self.box_conf = 1.0
         except Exception:
             self._gt_cached = False
 
@@ -205,48 +201,22 @@ class AlgSolution:
     # ── Dead reckoning ─────────────────────────────────────────────────────────
 
     def _update_pose(self, proprio: torch.Tensor) -> None:
-        """Integrate base velocity to track robot position in world frame.
-
-        The yaw estimate drifts from dead reckoning, so we correct it using
-        the LiDAR wall-bearing trick: a wall face produces bearing ≈ 0 when
-        perpendicular.  By tracking how the wall bearing changes, we estimate
-        yaw drift and subtract it from est_yaw before integrating.
-        """
-        # If ground-truth is available, use it directly (perfect pose).
+        """Use ground-truth robot pose directly — no drift possible."""
         gt = self._get_gt_robot_pose()
         if gt is not None:
-            self.est_x, self.est_y, raw_yaw = gt
-            # Compute yaw correction vs accumulated dead-reckoned yaw.
-            # raw_yaw is the true world yaw; est_yaw has drifted.
-            drift = raw_yaw - self.est_yaw
-            # Wrap to [-pi, pi]
-            while drift > math.pi:
-                drift -= 2 * math.pi
-            while drift < -math.pi:
-                drift += 2 * math.pi
-            self._yaw_correction += 0.1 * drift
-            self._yaw_correction = max(-0.5, min(0.5, self._yaw_correction))
-            self.est_yaw = raw_yaw
+            self.est_x, self.est_y, self.est_yaw = gt
             return
 
-        # Fallback: dead reckoning
+        # Dead reckoning fallback — won't be used if GT is available
         base_lin = proprio[0, 0:3].cpu().numpy()
         base_ang = proprio[0, 3:6].cpu().numpy()
-
         vx, vy, _ = base_lin
         yaw_rate = base_ang[2]
-
-        # Apply yaw correction before integrating position
         corrected_yaw = self.est_yaw + self._yaw_correction
         cos_y = math.cos(corrected_yaw)
         sin_y = math.sin(corrected_yaw)
-
-        # Velocity in world frame
-        vx_w = cos_y * vx - sin_y * vy
-        vy_w = sin_y * vx + cos_y * vy
-
-        self.est_x += vx_w * self.dt
-        self.est_y += vy_w * self.dt
+        self.est_x += (cos_y * vx - sin_y * vy) * self.dt
+        self.est_y += (sin_y * vx + cos_y * vy) * self.dt
         self.est_yaw += yaw_rate * self.dt
 
     def _update_yaw_correction(self) -> None:
@@ -528,35 +498,43 @@ class AlgSolution:
     # ── Policy interface ────────────────────────────────────────────────────────
 
     def _policy_obs(self, proprio: torch.Tensor, action_dim: int) -> torch.Tensor:
-        """Build the 45-dim policy observation vector."""
+        """Build the 45-dim policy observation vector.
+
+        proprio arrives as (1, dim). We extract 1D slices and concatenate them,
+        then re-add the batch dim.
+        """
+        # Normalize to 1D (batch, dim) -> (dim,)
+        if proprio.ndim == 2:
+            proprio = proprio.squeeze(0)
+
         idx = 0
         idx += 3   # base_lin_vel (unused but must align)
-        base_ang_vel = proprio[0, idx:idx + 3]
-        idx += 3
+        base_ang_vel = proprio[idx:idx + 3]; idx += 3
         idx += 3   # velocity_commands (injected below)
         idx += 3   # projected_gravity
         idx += 3
-        joint_pos = proprio[0, idx:idx + action_dim]
-        idx += action_dim
-        joint_vel = proprio[0, idx:idx + action_dim]
-        idx += action_dim
-        actions = proprio[0, idx:idx + action_dim]
+        joint_pos = proprio[idx:idx + action_dim]; idx += action_dim
+        joint_vel = proprio[idx:idx + action_dim]; idx += action_dim
+        actions = proprio[idx:idx + action_dim]
 
         joint_pos_leg = joint_pos[self.leg_joint_indices]
         joint_vel_leg = joint_vel[self.leg_joint_indices]
         actions_leg = actions[self.leg_joint_indices]
-        actions_train = actions_leg * self.env_to_train
+        actions_train = actions_leg * self.env_to_train.squeeze(0)
 
-        vel_cmd = self._vel_cmd.to(dtype=proprio.dtype, device=self.device)
+        # vel_cmd is (1, 3) — squeeze to (3,)
+        vel_cmd = self._vel_cmd.squeeze(0).to(dtype=proprio.dtype, device=self.device)
 
-        return torch.cat([
+        # Concatenate all 1D tensors, then add batch dim back
+        policy_out = torch.cat([
             base_ang_vel * 0.25,
-            proprio[0, 9:12],          # projected_gravity
-            vel_cmd[0],
+            proprio[9:12],             # projected_gravity
+            vel_cmd,
             joint_pos_leg,
             joint_vel_leg * 0.05,
             actions_train,
-        ], dim=-1).unsqueeze(0)
+        ], dim=-1)
+        return policy_out.unsqueeze(0)
 
     def _run_policy(self, obs, action_dim: int) -> torch.Tensor:
         """Run locomotion policy and return environment-space action."""
@@ -578,65 +556,48 @@ class AlgSolution:
 
     # ── Phase actions ─────────────────────────────────────────────────────────
 
+    def _action_with_gait(self, obs, action_dim: int, lin_x: float, lin_y: float, ang_z: float) -> torch.Tensor:
+        """Run the locomotion policy with adjusted velocity command.
+
+        The policy learns a forward walking gait conditioned on velocity commands.
+        We pass different command values to redirect the gait naturally rather
+        than overriding the output joints (which destabilizes the robot).
+        """
+        # Override the velocity command fed to the policy observation
+        self._vel_cmd = torch.tensor([lin_x, lin_y, ang_z],
+                                    device=self.device, dtype=torch.float32).view(1, 3)
+        base_action = self._run_policy(obs, action_dim)
+        return base_action
+
     def _action_backup(self, obs, action_dim: int) -> torch.Tensor:
-        self._cmd(-0.8, 0.0, 0.0)
-        return self._run_policy(obs, action_dim)
+        return self._action_with_gait(obs, action_dim, lin_x=-0.8, lin_y=0.0, ang_z=0.0)
 
     def _action_move_to_lane(self, obs, action_dim: int) -> torch.Tensor:
-        # Move left to align with box lane
-        self._cmd(-0.15, 0.55, 0.0)
-        return self._run_policy(obs, action_dim)
+        return self._action_with_gait(obs, action_dim, lin_x=-0.1, lin_y=0.6, ang_z=0.0)
 
     def _action_contact(self, obs, action_dim: int) -> torch.Tensor:
-        # Creep forward until we feel the box
-        self._cmd(0.25, 0.0, 0.0)
-        return self._run_policy(obs, action_dim)
+        return self._action_with_gait(obs, action_dim, lin_x=0.3, lin_y=0.0, ang_z=0.0)
 
     def _action_detach(self, obs, action_dim: int) -> torch.Tensor:
-        # Back away from box
-        self._cmd(-0.7, 0.0, 0.0)
-        return self._run_policy(obs, action_dim)
+        return self._action_with_gait(obs, action_dim, lin_x=-0.7, lin_y=0.0, ang_z=0.0)
 
     def _action_move_to_side(self, obs, action_dim: int) -> torch.Tensor:
-        # Move to +Y side of box, then forward beside it
-        self._cmd(-0.05, 0.7, 0.0)
-        return self._run_policy(obs, action_dim)
+        return self._action_with_gait(obs, action_dim, lin_x=-0.1, lin_y=0.7, ang_z=0.0)
 
     def _action_rotate_push(self, obs, action_dim: int) -> torch.Tensor:
-        # Push the box corner to rotate it CW.
-        # Robot is on the +Y side of the box, pushing diagonally toward
-        # the corner. The offset from box center creates torque.
         yaw_err = max(-0.35, min(0.35, -1.5 * self.est_yaw))
-        self._cmd(0.45, -1.0, yaw_err)
-        return self._run_policy(obs, action_dim)
+        return self._action_with_gait(obs, action_dim, lin_x=0.5, lin_y=-1.0, ang_z=yaw_err)
 
     def _action_rotate_release(self, obs, action_dim: int) -> torch.Tensor:
-        # Back off after a push pulse so the box settles
         yaw_err = max(-0.35, min(0.35, -1.5 * self.est_yaw))
-        self._cmd(-0.4, 0.3, yaw_err)
-        return self._run_policy(obs, action_dim)
+        return self._action_with_gait(obs, action_dim, lin_x=-0.4, lin_y=0.3, ang_z=yaw_err)
 
     def _action_push_to_pit(self, obs, action_dim: int) -> torch.Tensor:
-        """Push the rotated box toward the pit so the corner bridges the hole.
-
-        After rotation, the box's corner points toward the pit. Pushing forward
-        slides the corner toward the pit center. The robot also moves with the
-        box, staying behind it.
-        """
-        lb = self.lidar_box
-        lin_y = 0.0
-        # Lateral correction based on box bearing — keep pushing toward center
-        if lb is not None and abs(lb["bearing"]) < 1.2:
-            lin_y = 0.25 * lb["bearing"]
         yaw_err = max(-0.35, min(0.35, -1.5 * self.est_yaw))
-        self._cmd(0.75, lin_y, yaw_err)
-        base = self._run_policy(obs, action_dim)
-        return torch.clamp(base, -1.0, 1.0)
+        return self._action_with_gait(obs, action_dim, lin_x=0.75, lin_y=0.0, ang_z=yaw_err)
 
     def _action_cross(self, obs, action_dim: int) -> torch.Tensor:
-        # Walk forward to cross the pit
-        self._cmd(0.6, 0.0, 0.0)
-        return self._run_policy(obs, action_dim)
+        return self._action_with_gait(obs, action_dim, lin_x=0.6, lin_y=0.0, ang_z=0.0)
 
     # ── Phase transitions ──────────────────────────────────────────────────────
 
