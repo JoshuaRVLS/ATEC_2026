@@ -1,22 +1,15 @@
 """
-Task D solution: Box rotation for pit crossing.
+Task D: Push box into pit.
 
-Strategy (coordinate-based, sensor-driven):
-  1. INIT      → Calibrate robot + box pose from GT (first ~10 steps only)
-  2. TO_BOX    → Walk to box's Y position
-  3. APPROACH  → Walk to +Y side of box (rotation push position)
-  4. ROTATE    → Push against box corner → box rotates ~90°
-  5. ALIGN     → Get behind the rotated box
-  6. PUSH_TO_PIT → Push rotated box until corner bridges pit
-  7. CROSS     → Walk across pit using box corner as bridge
+Strategy:
+  Phase 1: GO_TO_BOX    → Walk LEFT in Y toward box's Y position
+  Phase 2: PUSH_FORWARD → Walk FORWARD to push box toward pit
+  Phase 3: CROSS        → Walk across pit
 
-Calibration (GT on first N steps only):
-  - Robot pose anchored from GT on steps 1-10
-  - Box pose anchored from GT on steps 1-10
-  - LiDAR box detection continues throughout (fused with GT at start)
-  - Dead reckoning + LiDAR yaw correction for pose updates after calibration
-
-After calibration: NO ground-truth access. Pure sensor estimation.
+Calibration: None. Initial pose from known spawn positions.
+Pose updates: Dead reckoning from base_lin_vel + LiDAR yaw correction.
+Box tracking: LiDAR bearing + range (no GT).
+Transition: Coordinate-based (with step-based fallback limit).
 """
 
 import os
@@ -25,13 +18,6 @@ import torch
 
 
 class AlgSolution:
-
-    ACTION_SCALE = 0.5
-    EE_BODY_NAME_CANDIDATES = ("gripper_base", "piper_gripper_base")
-    ARM_JOINT_NAME_CANDIDATES = (
-        ["joint1", "joint2", "joint3", "joint4", "joint5", "joint6"],
-        ["arm_joint1", "arm_joint2", "arm_joint3", "arm_joint4", "arm_joint5", "arm_joint6"],
-    )
 
     def __init__(self):
         policy_path = os.path.dirname(os.path.abspath(__file__)) + '/policy.pt'
@@ -63,158 +49,53 @@ class AlgSolution:
         # ── Timing ─────────────────────────────────────────────────────────────
         self._dt = 0.02  # decimation=4, sim.dt=0.005
 
-        # ── Fixed velocity command (same as solution_rl.py baseline) ──────────
-        # Policy was trained with these values — only change them if needed
-        self._vel_x = 0.5
-        self._vel_y = 0.0
-        self._vel_z = 0.0
-
-        # ── Calibration state ─────────────────────────────────────────────────
-        self._calibration_frames = 10  # calibrate from GT for first N steps
-        self._frame = 0
-        self._gt_calibrated = False  # set True after calibration window
-        self._scene = None  # cached scene for GT access
-
-        # ── Robot pose (calibrated at start, then dead reckoning) ──────────────
+        # ── Known initial positions (from env_cfg) ────────────────────────────
+        # Robot: (-3, 0, yaw=0), Box: (-3, 1.6), Pit center: x=-0.2
         self.est_x = -3.0
         self.est_y = 0.0
         self.est_yaw = 0.0
-        self._yaw_correction = 0.0  # LiDAR wall-bearing correction
+        self._yaw_correction = 0.0
+        self._wall_bearing_ref = None
 
-        # ── Box pose (calibrated at start, then LiDAR triangulation) ────────────
-        self.lidar_box = None   # raw LiDAR detection
+        # ── Box pose (LiDAR triangulation) ────────────────────────────────────
+        self.lidar_box = None   # {bearing, range, angular_width}
         self.box_x = -3.0
         self.box_y = 1.6
-        self.box_conf = 0.0
+        self.box_conf = 1.0     # start with high confidence from known init
 
-        # ── Rotation signal (accumulates during ROTATE phase) ─────────────────
+        # ── Rotation signal ────────────────────────────────────────────────────
         self._rotation_signal = 0.0
         self._prev_lidar_bearing = None
         self._bearing_delta_smoothed = 0.0
 
-        # ── LiDAR yaw correction ────────────────────────────────────────────────
-        self._wall_bearing_ref = None
-        self._yaw_conf_ticks = 0
-        self._yaw_drift_ticks = 0
+        # ── Velocity command (updated per phase) ───────────────────────────────
+        self._vel_x = 0.0
+        self._vel_y = 0.0
+        self._vel_z = 0.0
 
-        # ── State machine ────────────────────────────────────────────────────────
-        self.phase = "TO_BOX"
+        # ── State machine ───────────────────────────────────────────────────────
+        # 1. GO_TO_BOX: walk LEFT (vel_y=+0.5) until robot Y >= box Y (1.6)
+        # 2. PUSH_FORWARD: walk FORWARD (vel_x=+0.5) until robot X >= pit
+        # 3. CROSS: walk FORWARD (vel_x=+0.4) across pit
+        self.phase = "GO_TO_BOX"
         self.step = 0
 
-        # ── Phase targets (from known environment layout) ─────────────────────
-        # Box starts at (-3, 1.6), pit center at x≈-0.2
-        # Robot starts at (-3, 0, 0), facing -X direction (toward box)
-        # Coordinate system: +X = forward (toward pit), +Y = left of robot
-        self.BOX_Y = 1.6
-        self.SIDE_Y = 2.5        # rotation push position (+Y of box)
-        self.PIT_CENTER_X = -0.2  # center of pit
-        self.ROT_SIG_TARGET = 0.6
-        self.ROT_PUSH_STEPS = 80
-        self.ROT_RELEASE_STEPS = 50
-        self.MAX_ROT_CYCLES = 15
+        # ── Phase targets ──────────────────────────────────────────────────────
+        self.BOX_Y = 1.6       # transition when robot reaches box Y
+        self.PIT_X = -0.5      # transition when robot reaches pit
 
-        # Fallback step limits (coordinate-based + step-based backup)
-        self.STEP_LIMITS = {
-            "TO_BOX": 400,
-            "APPROACH": 350,
-            "ROTATE": 600,
-            "ALIGN": 300,
-            "PUSH_TO_PIT": 400,
-        }
-
-        # ── Rotation sub-state ──────────────────────────────────────────────────
-        self._rot_cycles = 0
-        self._rot_sub = "push"
+        # ── Step limits (fallback) ─────────────────────────────────────────────
+        self.STEP_LIMIT = 500
 
         # ── Diagnostic ────────────────────────────────────────────────────────
         self._last_phase = None
         self._printed_obs = False
 
     # ══════════════════════════════════════════════════════════════════════════
-    # Ground-truth access (calibration only — first N frames)
-    # ══════════════════════════════════════════════════════════════════════════
-
-    def _cache_scene(self, obs: dict) -> None:
-        """Cache scene from observation tensor (first frame only)."""
-        if self._scene is not None:
-            return
-        try:
-            proprio = obs.get("proprio")
-            if proprio is None or proprio.numel() == 0:
-                return
-
-            manager = getattr(proprio, "_manager", None)
-            if manager is None:
-                return
-
-            env = getattr(manager, "_env", None)
-            if env is None:
-                env = manager
-
-            scene = getattr(env, "scene", None)
-            if scene is None:
-                return
-
-            self._scene = scene
-        except Exception:
-            self._scene = None
-
-    def _get_gt_robot_pose(self):
-        """Return (x, y, yaw) of robot root in world frame."""
-        try:
-            if self._scene is None:
-                return None
-            robot = self._scene["robot"]
-            pos = robot.data.root_pos_w[0].cpu().numpy()
-            quat = robot.data.root_quat_w[0].cpu().numpy()
-            yaw = math.atan2(
-                2.0 * (quat[0] * quat[3] + quat[1] * quat[2]),
-                1.0 - 2.0 * (quat[1] ** 2 + quat[2] ** 2),
-            )
-            return float(pos[0]), float(pos[1]), float(yaw)
-        except Exception:
-            return None
-
-    def _get_gt_box_pose(self):
-        """Return (x, y) of box root in world frame."""
-        try:
-            if self._scene is None:
-                return None
-            box = self._scene["box"]
-            pos = box.data.root_pos_w[0].cpu().numpy()
-            return float(pos[0]), float(pos[1])
-        except Exception:
-            return None
-
-    def _calibrate(self, obs: dict) -> None:
-        """Calibrate poses from GT for first _calibration_frames steps."""
-        self._cache_scene(obs)
-
-        if self._frame >= self._calibration_frames:
-            self._gt_calibrated = True
-            return
-
-        # Robot pose from GT
-        gt = self._get_gt_robot_pose()
-        if gt is not None:
-            self.est_x, self.est_y, self.est_yaw = gt
-            # Initialize wall bearing reference from current LiDAR bearing
-            if self.lidar_box is not None and self._wall_bearing_ref is None:
-                self._wall_bearing_ref = self.est_yaw + self.lidar_box["bearing"]
-
-        # Box pose from GT (only once, when confidence is low)
-        if self.box_conf < 0.5:
-            gt_box = self._get_gt_box_pose()
-            if gt_box is not None:
-                self.box_x, self.box_y = gt_box
-                self.box_conf = 1.0
-
-    # ══════════════════════════════════════════════════════════════════════════
     # LiDAR processing
     # ══════════════════════════════════════════════════════════════════════════
 
     def _get_lidar_scan(self, obs) -> torch.Tensor | None:
-        """Extract horizontal LiDAR scan from obs['extero']."""
         extero = obs.get("extero")
         if extero is None or extero.numel() == 0:
             return None
@@ -226,7 +107,7 @@ class AlgSolution:
         return scan[0]
 
     def _detect_box_lidar(self, obs) -> dict | None:
-        """Detect box from LiDAR scan using outlier + clustering analysis."""
+        """Detect the box cluster in LiDAR scan."""
         scan = self._get_lidar_scan(obs)
         if scan is None or scan.numel() < 32:
             return None
@@ -234,11 +115,9 @@ class AlgSolution:
         flat = scan.flatten()
         finite_mask = flat.isfinite()
         values = flat[finite_mask]
-
         if values.numel() < 16:
             return None
 
-        # Collapse 16 vertical channels → horizontal profile
         n = flat.numel()
         if n % 360 == 0:
             cols = flat.view(-1, 360)
@@ -250,8 +129,6 @@ class AlgSolution:
             horizontal = flat
 
         n_bins = horizontal.numel()
-
-        # Find outlier bins (objects vs floor) via percentile threshold
         median = values.median()
         deviation = (horizontal - median).abs()
         valid_dev = deviation[horizontal.isfinite()]
@@ -277,7 +154,7 @@ class AlgSolution:
                 start = prev = idx
         clusters.append((start, prev))
 
-        # Merge wrap-around cluster
+        # Merge wrap-around
         if (len(clusters) > 1 and clusters[0][0] == 0
                 and clusters[-1][1] == n_bins - 1):
             last = clusters.pop(-1)
@@ -291,15 +168,12 @@ class AlgSolution:
             width = e - s + 1
             angular_w = float(width) * (2 * math.pi / float(n_bins))
 
-            # Filter: box-sized clusters (not walls, not tiny)
             if width < 4 or angular_w < 0.08 or angular_w > 1.2:
                 continue
 
-            # Range estimate from angular width (box ~1m wide)
             est_range = 1.0 / max(angular_w, 0.01)
             est_range = max(0.4, min(6.0, est_range))
 
-            # Weighted centroid bearing
             idxs = torch.arange(s, e + 1, device=self.device) % n_bins
             angles = (idxs.float() / float(n_bins - 1)) * (2 * math.pi) - math.pi
             weights = deviation[idxs].clamp_min(1e-4)
@@ -307,7 +181,6 @@ class AlgSolution:
             cos_mean = (weights * torch.cos(angles)).sum() / weights.sum()
             bearing = math.atan2(sin_mean.item(), cos_mean.item())
 
-            # Score: medium range + moderate width preferred
             range_score = 1.0 / (1.0 + 0.5 * abs(est_range - 2.0))
             bearing_score = 1.0 / (1.0 + 0.3 * abs(bearing))
             width_score = math.sqrt(float(width))
@@ -329,11 +202,11 @@ class AlgSolution:
         }
 
     # ══════════════════════════════════════════════════════════════════════════
-    # Pose estimation (post-calibration: dead reckoning + LiDAR yaw corr)
+    # Pose estimation
     # ══════════════════════════════════════════════════════════════════════════
 
     def _update_pose(self, proprio: torch.Tensor) -> None:
-        """Update robot pose via dead reckoning + LiDAR yaw correction."""
+        """Dead reckoning from base_lin_vel."""
         base_lin = proprio[0, 0:3].cpu().numpy()
         base_ang = proprio[0, 3:6].cpu().numpy()
         vx, vy = base_lin[0], base_lin[1]
@@ -351,36 +224,25 @@ class AlgSolution:
         while self.est_yaw < -math.pi: self.est_yaw += 2 * math.pi
 
     def _update_yaw_correction(self, lb: dict | None) -> None:
-        """Correct yaw drift using LiDAR wall-bearing (wide clusters)."""
-        if lb is None:
-            self._yaw_drift_ticks += 1
-            self._yaw_conf_ticks = 0
-            if self._yaw_drift_ticks > 200 and self._wall_bearing_ref is not None:
-                self._yaw_correction *= 0.998
+        """LiDAR wall-bearing yaw correction (wide clusters = wall)."""
+        if lb is None or lb.get("angular_width", 0) < 1.1:
             return
 
-        width = lb.get("angular_width", 0.3)
+        world_bearing = self.est_yaw + lb["bearing"]
+        if self._wall_bearing_ref is None:
+            self._wall_bearing_ref = world_bearing
+            self._yaw_correction = 0.0
+            return
 
-        if width > 1.1:
-            self._yaw_drift_ticks = 0
-            self._yaw_conf_ticks += 1
-
-            if self._wall_bearing_ref is None:
-                self._wall_bearing_ref = self.est_yaw + lb["bearing"]
-                self._yaw_correction = 0.0
-            else:
-                expected = self._wall_bearing_ref - self.est_yaw
-                drift = lb["bearing"] - expected
-                while drift > math.pi:  drift -= 2 * math.pi
-                while drift < -math.pi: drift += 2 * math.pi
-                self._yaw_correction += 0.04 * drift
-                self._yaw_correction = max(-0.5, min(0.5, self._yaw_correction))
-        else:
-            self._yaw_drift_ticks += 1
-            self._yaw_conf_ticks = 0
+        expected = self._wall_bearing_ref - self.est_yaw
+        drift = lb["bearing"] - expected
+        while drift > math.pi:  drift -= 2 * math.pi
+        while drift < -math.pi: drift += 2 * math.pi
+        self._yaw_correction += 0.04 * drift
+        self._yaw_correction = max(-0.5, min(0.5, self._yaw_correction))
 
     def _update_box_est(self, lb: dict | None) -> None:
-        """Update box position via LiDAR triangulation."""
+        """LiDAR triangulation of box position."""
         if lb is None:
             self.box_conf = max(0.0, self.box_conf * 0.97)
             return
@@ -393,7 +255,7 @@ class AlgSolution:
         cx = self.est_x + math.cos(world_bearing) * range_m
         cy = self.est_y + math.sin(world_bearing) * range_m
 
-        alpha = 0.2
+        alpha = 0.15
         if self.box_conf < 0.1:
             self.box_x, self.box_y = cx, cy
         else:
@@ -408,27 +270,22 @@ class AlgSolution:
                 self._prev_lidar_bearing = lb["bearing"]
             return
 
-        bearing = lb["bearing"]
-        range_m = lb["range"]
-
-        d_bearing = bearing - self._prev_lidar_bearing
+        d_bearing = lb["bearing"] - self._prev_lidar_bearing
         while d_bearing > math.pi:  d_bearing -= 2 * math.pi
         while d_bearing < -math.pi: d_bearing += 2 * math.pi
 
         self._bearing_delta_smoothed = 0.6 * self._bearing_delta_smoothed + 0.4 * d_bearing
 
-        # Only accumulate when pushing close to box
-        close_factor = 2.0 / max(0.8, range_m)
+        close_factor = 2.0 / max(0.8, lb["range"])
         self._rotation_signal += self._bearing_delta_smoothed * close_factor
 
-        self._prev_lidar_bearing = bearing
+        self._prev_lidar_bearing = lb["bearing"]
 
     # ══════════════════════════════════════════════════════════════════════════
-    # Policy interface (matches solution_rl.py exactly)
+    # Policy interface
     # ══════════════════════════════════════════════════════════════════════════
 
     def _get_velocity_commands(self, proprio: torch.Tensor) -> torch.Tensor:
-        """Return velocity command as 2D tensor (num_envs, 3)."""
         num_envs = int(proprio.shape[0])
         cmd = torch.tensor(
             [self._vel_x, self._vel_y, self._vel_z],
@@ -439,17 +296,17 @@ class AlgSolution:
         return cmd
 
     def _extract_policy_obs(self, obs, action_dim: int) -> torch.Tensor:
-        """Build the 45-dim policy observation. Mirrors solution_rl.py."""
+        """45-dim policy observation (mirrors solution_rl.py)."""
         proprio = obs["proprio"].to(self.device)
 
         idx = 0
-        _base_lin_vel = proprio[:, idx:idx + 3]; idx += 3
+        _ = proprio[:, idx:idx + 3]; idx += 3  # base_lin_vel (unused)
         base_ang_vel  = proprio[:, idx:idx + 3]; idx += 3
-        _velocity_commands_env = proprio[:, idx:idx + 3]; idx += 3
+        _ = proprio[:, idx:idx + 3]; idx += 3  # velocity_commands_env (overwritten)
         projected_gravity = proprio[:, idx:idx + 3]; idx += 3
-        joint_pos_all    = proprio[:, idx:idx + action_dim]; idx += action_dim
-        joint_vel_all    = proprio[:, idx:idx + action_dim]; idx += action_dim
-        actions_all      = proprio[:, idx:idx + action_dim]
+        joint_pos_all = proprio[:, idx:idx + action_dim]; idx += action_dim
+        joint_vel_all = proprio[:, idx:idx + action_dim]; idx += action_dim
+        actions_all   = proprio[:, idx:idx + action_dim]
 
         joint_pos_leg = joint_pos_all[:, self.leg_joint_indices]
         joint_vel_leg = joint_vel_all[:, self.leg_joint_indices]
@@ -477,7 +334,6 @@ class AlgSolution:
         return action_env
 
     def _run_policy(self, obs, action_dim: int) -> torch.Tensor:
-        """Run RL policy with current velocity command."""
         policy_obs = self._extract_policy_obs(obs, action_dim)
         with torch.inference_mode():
             action_train = self.policy(policy_obs)
@@ -489,58 +345,23 @@ class AlgSolution:
         return self._map_policy_action_to_env_action(action_train, action_dim)
 
     # ══════════════════════════════════════════════════════════════════════════
-    # State machine (coordinate-based)
+    # State machine
     # ══════════════════════════════════════════════════════════════════════════
 
     def _transition(self) -> None:
         p = self.phase
-        s = self.step
         rx, ry = self.est_x, self.est_y
-        _, by = self.box_x, self.box_y
-        limit = self.STEP_LIMITS.get(p, 9999)
 
-        if p == "TO_BOX":
-            if ry >= self.BOX_Y - 0.2 or s >= limit:
-                self.phase = "APPROACH"
+        if p == "GO_TO_BOX":
+            # Walk LEFT (positive Y) until reaching box's Y
+            # Only transition when Y is reached (no step fallback — wait for real position)
+            if ry >= self.BOX_Y:
+                self.phase = "PUSH_FORWARD"
                 self.step = 0
 
-        elif p == "APPROACH":
-            if ry >= self.SIDE_Y or s >= limit:
-                self.phase = "ROTATE"
-                self.step = 0
-                self._rot_cycles = 0
-                self._rot_sub = "push"
-                self._rotation_signal = 0.0
-                self._prev_lidar_bearing = None
-                self._bearing_delta_smoothed = 0.0
-
-        elif p == "ROTATE":
-            if self._rot_sub == "push":
-                if s >= self.ROT_PUSH_STEPS:
-                    self._rot_sub = "release"
-                    self.step = 0
-            elif self._rot_sub == "release":
-                if s >= self.ROT_RELEASE_STEPS:
-                    self._rot_cycles += 1
-                    if self._rotation_signal >= self.ROT_SIG_TARGET:
-                        self.phase = "ALIGN"
-                        self.step = 0
-                    elif self._rot_cycles >= self.MAX_ROT_CYCLES or s >= limit:
-                        self.phase = "ALIGN"
-                        self.step = 0
-                    else:
-                        self._rot_sub = "push"
-                        self.step = 0
-
-        elif p == "ALIGN":
-            # Move near box for final push
-            if abs(rx - self.box_x) < 0.8 or s >= limit:
-                self.phase = "PUSH_TO_PIT"
-                self.step = 0
-
-        elif p == "PUSH_TO_PIT":
-            # Push the rotated box toward the pit
-            if rx >= self.PIT_CENTER_X - 0.3 or s >= limit:
+        elif p == "PUSH_FORWARD":
+            # Walk FORWARD (+X) to push box into pit
+            if rx >= self.PIT_X:
                 self.phase = "CROSS"
                 self.step = 0
 
@@ -562,21 +383,9 @@ class AlgSolution:
         proprio = obs["proprio"].to(self.device)
         action_dim = (int(proprio.shape[-1]) - 12) // 3
 
-        # ── Step 1: Calibrate from GT (first N frames only) ──────────────────
-        self._calibrate(obs)
-
-        # ── Step 2: LiDAR detection ──────────────────────────────────────────
+        # ── Sensing ───────────────────────────────────────────────────────────
         lb = self._detect_box_lidar(obs)
-
-        # ── Step 3: Update estimates (calibration or sensor-based) ───────────
-        if self._gt_calibrated:
-            self._update_pose(proprio)
-        else:
-            # During calibration: keep using GT pose
-            gt = self._get_gt_robot_pose()
-            if gt is not None:
-                self.est_x, self.est_y, self.est_yaw = gt
-
+        self._update_pose(proprio)
         self._update_yaw_correction(lb)
         self._update_box_est(lb)
         self._update_rotation_signal(lb)
@@ -585,25 +394,19 @@ class AlgSolution:
         p = self.phase
 
         # ── Velocity commands per phase ─────────────────────────────────────
-        if p == "TO_BOX":
-            self._vel_x, self._vel_y, self._vel_z = 0.5, 0.4, 0.0
-        elif p == "APPROACH":
-            self._vel_x, self._vel_y, self._vel_z = 0.5, 0.5, 0.0
-        elif p == "ROTATE":
-            if self._rot_sub == "push":
-                self._vel_x, self._vel_y, self._vel_z = 0.5, -0.2, 0.0
-            else:
-                self._vel_x, self._vel_y, self._vel_z = 0.1, 0.0, 0.0
-        elif p == "ALIGN":
-            self._vel_x, self._vel_y, self._vel_z = 0.5, 0.0, 0.0
-        elif p == "PUSH_TO_PIT":
+        # Robot frame: +X = forward, +Y = left
+        if p == "GO_TO_BOX":
+            # Move LEFT (toward box's Y) — NO forward (wall at x=-3)
+            self._vel_x, self._vel_y, self._vel_z = 0.0, 0.5, 0.0
+        elif p == "PUSH_FORWARD":
+            # Push box toward pit — move FORWARD
             self._vel_x, self._vel_y, self._vel_z = 0.5, 0.0, 0.0
         elif p == "CROSS":
             self._vel_x, self._vel_y, self._vel_z = 0.4, 0.0, 0.0
 
         action = self._run_policy(obs, action_dim)
 
-        # ── Log on phase change ────────────────────────────────────────────
+        # ── Log ─────────────────────────────────────────────────────────────
         if p != self._last_phase:
             lb_str = (f"bear={lb['bearing']:+.2f} rng={lb['range']:.2f} aw={lb['angular_width']:.2f}"
                      if lb else "none")
@@ -611,13 +414,10 @@ class AlgSolution:
                 f"[D] phase={p:<14} step={self.step:>3}  "
                 f"robot=({self.est_x:+.2f},{self.est_y:+.2f},yaw={self.est_yaw:+.2f})  "
                 f"box=({self.box_x:+.2f},{self.box_y:+.2f}) conf={self.box_conf:.2f}  "
-                f"lidar=[{lb_str}]  rot_sig={self._rotation_signal:+.3f}  "
-                f"yaw_corr={self._yaw_correction:+.3f}  "
-                f"cmd=({self._vel_x:+.1f},{self._vel_y:+.1f})  "
-                f"cal={self._frame}/{self._calibration_frames}"
+                f"lidar=[{lb_str}]  rot={self._rotation_signal:+.3f}  "
+                f"cmd=({self._vel_x:+.1f},{self._vel_y:+.1f})"
             )
             self._last_phase = p
 
         self.step += 1
-        self._frame += 1
         return {"action": action.cpu().numpy().tolist(), "giveup": False}
