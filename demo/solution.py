@@ -88,9 +88,13 @@ class AlgSolution:
         # ── LiDAR ────────────────────────────────────────────────────────────
         self.lidar_box = None
 
-                # ── Score tracking ─────────────────────────────────────────────────
-        self._prev_score = 0
-        self._score_stalled_counter = 0
+        # ── Box estimator (from LiDAR) ─────────────────────────────────────
+        self.est_box_x = None
+        self.est_box_y = None
+        self._prev_lidar_range = None
+        self._prev_lidar_bearing = None
+        self._range_history = []
+        self._MAX_RANGE_HISTORY = 20
 
         # ── Diagnostic ─────────────────────────────────────────────────────
         self._last_phase = None
@@ -239,31 +243,30 @@ class AlgSolution:
     def _estimate_box_world_pos(self) -> tuple[float, float] | None:
         """Estimate box position in WORLD frame using LiDAR + robot pose.
 
-        LiDAR gives us:
-        - bearing: angle from robot forward direction (radians)
-        - range: distance to box (meters)
-
-        Transform from robot frame to world frame using robot pose.
+        Also tracks range history to detect when robot passes the box.
         """
         if self.lidar_box is None:
             return None
 
-        bearing = self.lidar_box['bearing']   # radians from robot forward
-        rng = self.lidar_box['range']         # meters to box
+        bearing = self.lidar_box['bearing']
+        rng = self.lidar_box['range']
 
-        # Clamp range to reasonable bounds (box is 0.8m wide, ~1m away when pushing)
+        # Track range history for pass-by detection
+        self._range_history.append(rng)
+        if len(self._range_history) > self._MAX_RANGE_HISTORY:
+            self._range_history.pop(0)
+        self._prev_lidar_range = rng
+        self._prev_lidar_bearing = bearing
+
+        # Clamp range
         if rng < 0.5 or rng > 5.0:
             return None
 
-        # Robot frame: +X = forward, +Y = left
-        # Bearing=0 means box is straight ahead (+X in robot frame)
-        # Bearing=+π/2 means box is to the LEFT (+Y in robot frame)
-
         # Box position in robot frame
-        box_rx = rng * math.cos(bearing)   # forward/back
-        box_ry = rng * math.sin(bearing)   # left/right
+        box_rx = rng * math.cos(bearing)
+        box_ry = rng * math.sin(bearing)
 
-        # Transform to world frame using robot pose
+        # Transform to world frame
         cos_y = math.cos(self.est_yaw)
         sin_y = math.sin(self.est_yaw)
 
@@ -275,25 +278,71 @@ class AlgSolution:
 
         return self.est_box_x, self.est_box_y
 
-    def _is_box_stuck(self, min_delta: float = 0.02) -> bool:
-        """Detect if box is stuck (range not changing significantly).
+    def _detected_box_pass(self) -> bool:
+        """Detect if robot has passed the box (box is now behind robot).
 
-        Args:
-            min_delta: minimum range change to consider box moving (meters)
+        When passing a box:
+        1. Range suddenly increases (was 1.5m, now 3m+)
+        2. Box bearing shifts (was ahead, now to side or behind)
         """
-        if self.lidar_box is None or self._prev_lidar_range is None:
+        if len(self._range_history) < 10:
             return False
 
-        delta = abs(self.lidar_box['range'] - self._prev_lidar_range)
-        if delta < min_delta:
-            self._box_stuck_counter += 1
+        recent = self._range_history[-5:]
+        older = self._range_history[-10:-5] if len(self._range_history) >= 10 else self._range_history[:-5]
+
+        avg_recent = sum(recent) / len(recent)
+        avg_older = sum(older) / len(older)
+
+        # Range suddenly increased by 1.5m+ → robot passed the box
+        if avg_recent > avg_older + 1.5:
+            return True
+
+        return False
+
+    def _estimate_box_yaw(self) -> float | None:
+        """Estimate box orientation (yaw) using LiDAR edge analysis.
+
+        Method: Use angular extent of LiDAR cluster to estimate box orientation.
+        - When box is perpendicular to robot, angular width is LARGE
+        - When box is parallel to robot, angular width is SMALL
+
+        The angular_width from our detection gives us the apparent size.
+        Combined with range, we can estimate the effective width and infer rotation.
+
+        Reference:
+        - "Real-time 3D LiDAR-based Object Pose Estimation for Mobile Manipulation"
+        - "Rectangular Box Detection using 2D LiDAR Range Data"
+        """
+        if self.lidar_box is None:
+            return None
+
+        angular_w = self.lidar_box.get('angular_width', 0)
+        rng = self.lidar_box.get('range', 2.0)
+
+        if angular_w <= 0 or rng <= 0:
+            return None
+
+        # Box physical width is ~0.8m (from env_cfg)
+        BOX_WIDTH = 0.8
+
+        # Angular width θ → chord width w = 2 * r * sin(θ/2)
+        # For small angles: w ≈ r * θ
+        # Apparent angular width tells us which face we're seeing
+        apparent_width = rng * angular_w
+
+        if apparent_width > BOX_WIDTH * 1.3:
+            # Angular width larger than physical width → we're seeing a longer face
+            # This means box is somewhat rotated, presenting its diagonal or side
+            yaw_est = 0.0  # Unknown exact angle, but box is rotated
+        elif apparent_width < BOX_WIDTH * 0.7:
+            # Angular width smaller → we're seeing edge-on or box is rotated away
+            yaw_est = math.pi / 4  # ~45 degree rotation
         else:
-            self._box_stuck_counter = 0
+            # Normal view, box roughly aligned
+            yaw_est = 0.0
 
-        self._prev_lidar_range = self.lidar_box['range']
-
-        # Box is stuck if range hasn't changed for 30+ consecutive frames
-        return self._box_stuck_counter >= 30
+        return yaw_est
 
     def _is_box_in_pit(self) -> bool:
         """Check if box is in pit reward zone (x ∈ [-0.7, 0.7])."""
@@ -322,27 +371,37 @@ class AlgSolution:
                 self.step = 0
 
         elif p == "PUSH_RIGHT":
-            # KEEP PUSHING until box is IN PIT
-            # Only transition when box actually reaches pit zone
-            if self._is_box_in_pit():
-                self.phase = "BACK_SIDE"
-                self.step = 0
-                return
-            # Also transition if robot has walked past the box (box behind robot)
-            if self.est_box_x is not None and self.est_x > self.est_box_x + 1.5:
+            # PUSH logic: robot needs to be BEHIND box (x < box_x) to push toward pit (x=0)
+            # Use LiDAR bearing: bearing > 0 means box is to robot's left
+            #                 bearing < 0 means box is to robot's right
+            # If LiDAR says box is ahead (bearing near 0) and range is small, we're in contact
+            if self.lidar_box and abs(self.lidar_box['bearing']) < 0.3 and self.lidar_box['range'] < 1.5:
+                # Box is directly ahead and close - we're pushing, keep going
+                pass
+            # Check if robot has walked PAST the box (should detect by range increasing)
+            if self.lidar_box and self.lidar_box['range'] > 2.5 and self.est_x > -2.5:
+                # Range suddenly increased AND robot is past box location - box must be behind
                 self.phase = "BACK_SIDE"
                 self.step = 0
                 return
 
         elif p == "BACK_SIDE":
-            # Move to y < box_y (south of box) for second push
-            if ry <= self.BOX_Y - 0.2 or s >= self.BACK_SIDE_STEPS:
-                self.phase = "PUSH_PIT"
-                self.step = 0
+            # Move to the other side of box (toward pit at x=0)
+            # Use LiDAR: if box is detected to the right (bearing < 0), move right
+            #           if box is detected to the left (bearing > 0), move left
+            if self.lidar_box:
+                # Simple: move toward the box's Y position
+                if ry > self.BOX_Y - 0.2 or s >= self.BACK_SIDE_STEPS:
+                    self.phase = "PUSH_PIT"
+                    self.step = 0
+            else:
+                # No LiDAR, use step limit
+                if s >= self.BACK_SIDE_STEPS:
+                    self.phase = "PUSH_PIT"
+                    self.step = 0
 
         elif p == "PUSH_PIT":
-            # KEEP PUSHING until box is IN PIT
-            # Only transition when box actually reaches pit zone
+            # Keep pushing until box is in pit (x ∈ [-0.7, 0.7])
             if self._is_box_in_pit():
                 self.phase = "CROSS"
                 self.step = 0
@@ -478,10 +537,12 @@ class AlgSolution:
         # ── Log (every step) ──────────────────────────────────────────────────
         lb_str = (f"rng={lb['range']:.2f}" if lb else "none")
         bx_str = (f"box=({self.est_box_x:+.2f},{self.est_box_y:+.2f})" if self.est_box_x is not None else "box=unk")
+        box_yaw = (f"yaw={math.degrees(self._estimate_box_yaw() or 0):+.0f}°" if lb else "")
         in_pit = "✓PIT" if self._is_box_in_pit() else ""
+        passed = "⚠PASS" if self._detected_box_pass() else ""
         print(
             f"[D] {p:<12} | {self.step:<4} | robot=({self.est_x:+.2f},{self.est_y:+.2f},{math.degrees(self.est_yaw):+.0f}°) | "
-            f"{bx_str} | {lb_str} | {in_pit}"
+            f"{bx_str} {box_yaw} | {lb_str} | {in_pit}{passed}"
         )
 
         self.step += 1
