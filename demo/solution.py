@@ -65,7 +65,11 @@ class AlgSolution:
         self.PIT_X = 1.0      # cross pit until this X
 
         # ── Velocity command ───────────────────────────────────────────────
-        self._vel_x = 0.5
+        # Convention (from testing):
+        #   vel_x = forward speed (+X world)
+        #   vel_y = strafe: +value=LEFT, -value=RIGHT
+        #   vel_x = -0.3 = backward (in -X)
+        self._vel_x = 0.0
         self._vel_y = 0.0
         self._vel_z = 0.0
 
@@ -335,22 +339,23 @@ class AlgSolution:
         p = self.phase
 
         # ── Velocity command per phase ────────────────────────────────────
-        # heading: 0=+X, π=-X, +π/2=+Y(left), -π/2=-Y(right)
+        # Convention (from user testing):
+        #   vel_x = forward speed (+X world), vel_y = strafe (+=left, -=right)
         if p == "BACK":
-            self._vel_x = 0.3
-            self._vel_y = math.pi      # face -X
+            self._vel_x = -0.3  # backward in -X
+            self._vel_y = 0.0
         elif p == "LEFT":
-            self._vel_x = 0.5
-            self._vel_y = math.pi / 2  # face +Y (left)
+            self._vel_x = 0.0
+            self._vel_y = 0.5   # strafe left (+Y)
         elif p == "PUSH_RIGHT":
-            self._vel_x = 0.5
-            self._vel_y = 0.0          # face +X (forward)
+            self._vel_x = 0.5   # forward (+X)
+            self._vel_y = 0.0
         elif p == "BACK_SIDE":
-            self._vel_x = 0.3
-            self._vel_y = -math.pi / 2 # face -Y (right)
+            self._vel_x = 0.0
+            self._vel_y = -0.5  # strafe right (-Y)
         elif p == "PUSH_PIT":
             self._vel_x = 0.5
-            self._vel_y = 0.0          # face +X
+            self._vel_y = 0.0
         elif p == "CROSS":
             self._vel_x = 0.4
             self._vel_y = 0.0
