@@ -1,24 +1,20 @@
 """
 Task D: Push box into pit, then cross.
 
-Scoring (36 total):
-  - Robot crossing x=-1.4  → +2
-  - Robot crossing x=2.0  → +20
-  - Box in pit [-0.7, 0.7] → +14
-  - Success: robot x > 3.5
+World layout:
+  - Robot spawns at (-3, 0), facing +X
+  - Box at (-3, 1.6), pit at x≈0 (reward zone x ∈ [-0.7, 0.7])
+  - Robot must maneuver around box and push it into pit
 
-Layout:
-  - Robot at (-3, 0), box at (-3, 1.6), pit at x≈0
-  - Box must be pushed into pit (x-range [-0.7, 0.7])
-  - Robot must then cross the pit
+Sequence (coordinate-based):
+  1. BACK      → back up from box for clearance
+  2. LEFT      → walk to Y > box_Y (left side of box)
+  3. PUSH_RIGHT→ push box in +X direction
+  4. BACK_SIDE → back up to Y < box_Y (behind box)
+  5. PUSH_PIT  → push rotated box into pit
+  6. CROSS     → walk across pit
 
-Sequence:
-  1. APPROACH  → Walk forward toward box's X, then strafe to align
-  2. PUSH_BOX  → Push box toward pit (x direction)
-  3. CROSS     → Walk across pit
-
-The robot can ONLY walk forward (vel_x direction). It must approach
-from the side of the box and push forward.
+Transitions use actual robot WORLD POSITION (from dead reckoning).
 """
 
 import os
@@ -55,33 +51,59 @@ class AlgSolution:
             (1, self.arm_action_dim), device=self.device, dtype=torch.float32,
         )
 
-        # ── Velocity command ─────────────────────────────────────────────────
-        # vel_x = forward speed, vel_y = heading (radians), vel_z = turn rate
+        # ── Timing ────────────────────────────────────────────────────────
+        self._dt = 0.02  # decimation=4, sim.dt=0.005
+
+        # ── Robot pose (dead reckoning from base_lin_vel) ─────────────────
+        self.est_x = -3.0
+        self.est_y = 0.0
+        self.est_yaw = 0.0
+
+        # ── Box target Y (from known init position) ────────────────────────
+        self.BOX_Y = 1.6      # box's Y position
+        self.BACK_X = -3.5    # back up to this X
+        self.PIT_X = 1.0      # cross pit until this X
+
+        # ── Velocity command ───────────────────────────────────────────────
         self._vel_x = 0.5
-        self._vel_y = 0.0  # heading (0 = face +X)
+        self._vel_y = 0.0
         self._vel_z = 0.0
 
-                # ── State machine ────────────────────────────────────────────────────────
-        # Robot at (-3, 0), box at (-3, 1.6), pit at x≈0
-        # Robot faces +X (forward). Box is to the LEFT (+Y) of robot.
-        # vel_y = heading in radians: 0 = face +X, +1.57 = face +Y (left)
-        self.phase = "TO_SIDE"
+        # ── State machine ─────────────────────────────────────────────────
+        self.phase = "BACK"
         self.step = 0
 
-        # ── LiDAR box tracking ─────────────────────────────────────────────────
+        # ── LiDAR ────────────────────────────────────────────────────────────
         self.lidar_box = None
 
-        # ── Step limits ────────────────────────────────────────────────────────
-        self.TO_SIDE_STEPS = 400     # walk to +Y side of box
-        self.PUSH_STEPS = 800        # push box toward pit
-        self.CROSS_STEPS = 400       # walk across pit
-
-        # ── Diagnostic ─────────────────────────────────────────────────────────
+        # ── Diagnostic ─────────────────────────────────────────────────────
         self._last_phase = None
         self._printed_obs = False
 
     # ══════════════════════════════════════════════════════════════════════════
-    # LiDAR processing
+    # Pose estimation (dead reckoning)
+    # ══════════════════════════════════════════════════════════════════════════
+
+    def _update_pose(self, proprio: torch.Tensor) -> None:
+        """Integrate robot position from base_lin_vel."""
+        base_lin = proprio[0, 0:3].cpu().numpy()
+        base_ang = proprio[0, 3:6].cpu().numpy()
+        vx, vy = base_lin[0], base_lin[1]
+        yaw_rate = base_ang[2]
+
+        cos_y = math.cos(self.est_yaw)
+        sin_y = math.sin(self.est_yaw)
+
+        # World frame integration
+        self.est_x += (cos_y * vx - sin_y * vy) * self._dt
+        self.est_y += (sin_y * vx + cos_y * vy) * self._dt
+        self.est_yaw += yaw_rate * self._dt
+
+        while self.est_yaw > math.pi:  self.est_yaw -= 2 * math.pi
+        while self.est_yaw < -math.pi: self.est_yaw += 2 * math.pi
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # LiDAR
     # ══════════════════════════════════════════════════════════════════════════
 
     def _get_lidar_scan(self, obs) -> torch.Tensor | None:
@@ -96,7 +118,6 @@ class AlgSolution:
         return scan[0]
 
     def _detect_box_lidar(self, obs) -> dict | None:
-        """Detect box cluster in LiDAR scan."""
         scan = self._get_lidar_scan(obs)
         if scan is None or scan.numel() < 32:
             return None
@@ -188,26 +209,40 @@ class AlgSolution:
         }
 
     # ══════════════════════════════════════════════════════════════════════════
-    # State machine
+    # State machine (coordinate-based using world position)
     # ══════════════════════════════════════════════════════════════════════════
 
     def _transition(self) -> None:
         p = self.phase
-        s = self.step
-        lb = self.lidar_box
+        rx, ry = self.est_x, self.est_y
 
-        if p == "TO_SIDE":
-            # Strafe left (heading=+1.57) toward box's Y. Transition when box is close.
-            if lb is not None and lb["range"] < 1.0:
-                self.phase = "PUSH_TO_PIT"
-                self.step = 0
-            elif s >= self.TO_SIDE_STEPS:
-                self.phase = "PUSH_TO_PIT"
+        if p == "BACK":
+            # Back up until robot X < BACK_X
+            if rx <= self.BACK_X:
+                self.phase = "LEFT"
                 self.step = 0
 
-        elif p == "PUSH_TO_PIT":
-            # Face +X (heading=0) and push box toward pit
-            if s >= self.PUSH_STEPS:
+        elif p == "LEFT":
+            # Walk to Y > BOX_Y (left side of box)
+            if ry >= self.BOX_Y:
+                self.phase = "PUSH_RIGHT"
+                self.step = 0
+
+        elif p == "PUSH_RIGHT":
+            # Push box +X until robot passes box X
+            if rx >= -2.8:
+                self.phase = "BACK_SIDE"
+                self.step = 0
+
+        elif p == "BACK_SIDE":
+            # Walk to Y < BOX_Y (right side / behind box)
+            if ry <= self.BOX_Y - 0.3:
+                self.phase = "PUSH_PIT"
+                self.step = 0
+
+        elif p == "PUSH_PIT":
+            # Push box into pit until robot reaches PIT_X
+            if rx >= self.PIT_X:
                 self.phase = "CROSS"
                 self.step = 0
 
@@ -291,41 +326,45 @@ class AlgSolution:
         proprio = obs["proprio"].to(self.device)
         action_dim = (int(proprio.shape[-1]) - 12) // 3
 
-        # ── LiDAR sensing ─────────────────────────────────────────────────────
+        # ── Pose update + sensing ───────────────────────────────────────────
+        self._update_pose(proprio)
         lb = self._detect_box_lidar(obs)
         self.lidar_box = lb
         self._transition()
 
         p = self.phase
 
-        # ── Velocity command ───────────────────────────────────────────────────
-        # vel_x = forward speed (always 0.5)
-        # vel_y = heading: 0=face +X, +1.57=face +Y (left)
-        if p == "TO_SIDE":
-            # Strafe toward box: heading = +1.57 (face +Y = left)
+        # ── Velocity command per phase ────────────────────────────────────
+        # heading: 0=+X, π=-X, +π/2=+Y(left), -π/2=-Y(right)
+        if p == "BACK":
             self._vel_x = 0.3
-            self._vel_y = 1.57  # face +Y (left)
-            self._vel_z = 0.0
-        elif p == "PUSH_TO_PIT":
-            # Face +X and push forward
+            self._vel_y = math.pi      # face -X
+        elif p == "LEFT":
             self._vel_x = 0.5
-            self._vel_y = 0.0   # face +X (forward)
-            self._vel_z = 0.0
+            self._vel_y = math.pi / 2  # face +Y (left)
+        elif p == "PUSH_RIGHT":
+            self._vel_x = 0.5
+            self._vel_y = 0.0          # face +X (forward)
+        elif p == "BACK_SIDE":
+            self._vel_x = 0.3
+            self._vel_y = -math.pi / 2 # face -Y (right)
+        elif p == "PUSH_PIT":
+            self._vel_x = 0.5
+            self._vel_y = 0.0          # face +X
         elif p == "CROSS":
             self._vel_x = 0.4
             self._vel_y = 0.0
-            self._vel_z = 0.0
+        self._vel_z = 0.0
 
         action = self._run_policy(obs, action_dim)
 
-        # ── Log ──────────────────────────────────────────────────────────────
+        # ── Log ──────────────────────────────────────────────────────────
         if p != self._last_phase:
-            lb_str = (f"rng={lb['range']:.2f} aw={lb['angular_width']:.2f}"
-                     if lb else "none")
+            lb_str = (f"rng={lb['range']:.2f}" if lb else "none")
+            hdg_deg = f"{math.degrees(self._vel_y):+.0f}°"
             print(
-                f"[D] phase={p:<12} step={self.step:>3}  "
-                f"lidar=[{lb_str}]  "
-                f"cmd=(fwd={self._vel_x:+.1f}, hdg={self._vel_y:+.2f})"
+                f"[D] phase={p:<12}  robot=({self.est_x:+.2f},{self.est_y:+.2f})  "
+                f"lidar=[{lb_str}]  cmd=(fwd={self._vel_x:+.1f}, hdg={hdg_deg})"
             )
             self._last_phase = p
 
