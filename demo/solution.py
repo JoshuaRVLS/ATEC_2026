@@ -243,8 +243,8 @@ class AlgSolution:
                 self.step = 0
 
         elif p == "LEFT":
-            # Go to y < box_y (left/south side of box)
-            if ry <= self.BOX_Y - 0.3 or s >= self.LEFT_STEPS:
+            # Go to y > box_y + 0.5 (north/top side of box)
+            if ry >= self.BOX_Y + 0.5 or s >= self.LEFT_STEPS:
                 self.phase = "PUSH_RIGHT"
                 self.step = 0
 
@@ -361,9 +361,9 @@ class AlgSolution:
             self._vel_y = 0.0
             self._vel_z = 0.0
         elif p == "LEFT":
-            # Go to y < box_y (south/left side of box) → move DOWN in Y → vel_y = -1.0
+            # Go to y > box_y + 0.5 (north/top side of box) → vel_y = +1.0 (strafe LEFT in +Y)
             self._vel_x = 0.0
-            self._vel_y = -1.0   # strafe RIGHT (-Y direction) to go south of box
+            self._vel_y = 1.0   # strafe LEFT (+Y direction) to go north of box
             self._vel_z = 0.0
         elif p == "PUSH_RIGHT":
             self._vel_x = 0.8   # moderate forward
