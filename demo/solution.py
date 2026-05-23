@@ -61,8 +61,8 @@ class AlgSolution:
 
         # ── Box target Y (from known init position) ────────────────────────
         self.BOX_Y = 1.6      # box's Y position
-        self.BACK_X = -3.5    # back up to this X
-        self.PIT_X = 1.0      # cross pit until this X
+        self.BACK_X = -4.0    # back up farther
+        self.PIT_X = 1.5      # cross pit until this X
 
         # ── Velocity command ───────────────────────────────────────────────
         # Convention (from testing):
@@ -76,6 +76,14 @@ class AlgSolution:
         # ── State machine ─────────────────────────────────────────────────
         self.phase = "BACK"
         self.step = 0
+
+        # ── Step limits per phase (fallback) ───────────────────────────────
+        self.BACK_STEPS = 800       # mundur lebih lama
+        self.LEFT_STEPS = 600
+        self.PUSH_RIGHT_STEPS = 600
+        self.BACK_SIDE_STEPS = 600
+        self.PUSH_PIT_STEPS = 700
+        self.CROSS_STEPS = 500
 
         # ── LiDAR ────────────────────────────────────────────────────────────
         self.lidar_box = None
@@ -218,35 +226,31 @@ class AlgSolution:
 
     def _transition(self) -> None:
         p = self.phase
+        s = self.step
         rx, ry = self.est_x, self.est_y
 
         if p == "BACK":
-            # Back up until robot X < BACK_X
-            if rx <= self.BACK_X:
+            if rx <= self.BACK_X or s >= self.BACK_STEPS:
                 self.phase = "LEFT"
                 self.step = 0
 
         elif p == "LEFT":
-            # Walk to Y > BOX_Y (left side of box)
-            if ry >= self.BOX_Y:
+            if ry >= self.BOX_Y or s >= self.LEFT_STEPS:
                 self.phase = "PUSH_RIGHT"
                 self.step = 0
 
         elif p == "PUSH_RIGHT":
-            # Push box +X until robot passes box X
-            if rx >= -2.8:
+            if rx >= -2.8 or s >= self.PUSH_RIGHT_STEPS:
                 self.phase = "BACK_SIDE"
                 self.step = 0
 
         elif p == "BACK_SIDE":
-            # Walk to Y < BOX_Y (right side / behind box)
-            if ry <= self.BOX_Y - 0.3:
+            if ry <= self.BOX_Y - 0.3 or s >= self.BACK_SIDE_STEPS:
                 self.phase = "PUSH_PIT"
                 self.step = 0
 
         elif p == "PUSH_PIT":
-            # Push box into pit until robot reaches PIT_X
-            if rx >= self.PIT_X:
+            if rx >= self.PIT_X or s >= self.PUSH_PIT_STEPS:
                 self.phase = "CROSS"
                 self.step = 0
 
@@ -339,25 +343,24 @@ class AlgSolution:
         p = self.phase
 
         # ── Velocity command per phase ────────────────────────────────────
-        # Convention (from user testing):
-        #   vel_x = forward speed (+X world), vel_y = strafe (+=left, -=right)
+        # vel_x = forward speed in +X world, vel_y = strafe (+=left, -=right)
         if p == "BACK":
-            self._vel_x = -0.3  # backward in -X
+            self._vel_x = -1.0  # fast backward
             self._vel_y = 0.0
         elif p == "LEFT":
             self._vel_x = 0.0
-            self._vel_y = 0.5   # strafe left (+Y)
+            self._vel_y = 1.0   # fast strafe left
         elif p == "PUSH_RIGHT":
-            self._vel_x = 0.5   # forward (+X)
+            self._vel_x = 1.0   # fast forward
             self._vel_y = 0.0
         elif p == "BACK_SIDE":
             self._vel_x = 0.0
-            self._vel_y = -0.5  # strafe right (-Y)
+            self._vel_y = -1.0  # fast strafe right
         elif p == "PUSH_PIT":
-            self._vel_x = 0.5
+            self._vel_x = 1.0
             self._vel_y = 0.0
         elif p == "CROSS":
-            self._vel_x = 0.4
+            self._vel_x = 0.8
             self._vel_y = 0.0
         self._vel_z = 0.0
 
