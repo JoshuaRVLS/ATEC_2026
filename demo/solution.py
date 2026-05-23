@@ -243,7 +243,8 @@ class AlgSolution:
                 self.step = 0
 
         elif p == "LEFT":
-            if ry >= self.BOX_Y or s >= self.LEFT_STEPS:
+            # Go to y < box_y (left/south side of box)
+            if ry <= self.BOX_Y - 0.3 or s >= self.LEFT_STEPS:
                 self.phase = "PUSH_RIGHT"
                 self.step = 0
 
@@ -354,17 +355,16 @@ class AlgSolution:
         p = self.phase
 
         # ── Velocity command per phase ────────────────────────────────────
-        # vel_x = forward speed in +X world, vel_y = strafe (+=left, -=right)
-        # heading_command=True → command[2] = TARGET HEADING in world frame
-        # Robot will rotate to achieve target heading while moving
+        # vel_x = forward speed in +X world, vel_y = strafe (+=left/+Y, -=right/-Y)
         if p == "BACK":
             self._vel_x = -1.0  # fast backward
             self._vel_y = 0.0
-            self._vel_z = 0.0   # no heading target during back
+            self._vel_z = 0.0
         elif p == "LEFT":
+            # Go to y < box_y (south/left side of box) → move DOWN in Y → vel_y = -1.0
             self._vel_x = 0.0
-            self._vel_y = 1.0   # fast strafe left
-            self._vel_z = 0.0   # maintain current heading
+            self._vel_y = -1.0   # strafe RIGHT (-Y direction) to go south of box
+            self._vel_z = 0.0
         elif p == "PUSH_RIGHT":
             self._vel_x = 0.8   # moderate forward
             self._vel_y = 0.0
