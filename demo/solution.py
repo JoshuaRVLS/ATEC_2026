@@ -386,19 +386,13 @@ class AlgSolution:
                 return
 
         elif p == "BACK_SIDE":
-            # Move to the other side of box (toward pit at x=0)
-            # Use LiDAR: if box is detected to the right (bearing < 0), move right
-            #           if box is detected to the left (bearing > 0), move left
-            if self.lidar_box:
-                # Simple: move toward the box's Y position
-                if ry > self.BOX_Y - 0.2 or s >= self.BACK_SIDE_STEPS:
-                    self.phase = "PUSH_PIT"
-                    self.step = 0
-            else:
-                # No LiDAR, use step limit
-                if s >= self.BACK_SIDE_STEPS:
-                    self.phase = "PUSH_PIT"
-                    self.step = 0
+            # CRITICAL: Must go to box's Y position before pushing
+            # Box is at y≈0.3, robot is at y≈2.3 - need to align!
+            target_y = self.est_box_y if self.est_box_y is not None else self.BOX_Y
+            # Move to y < box_y (south/behind box from pit's perspective)
+            if ry <= target_y + 0.2 or s >= self.BACK_SIDE_STEPS:
+                self.phase = "PUSH_PIT"
+                self.step = 0
 
         elif p == "PUSH_PIT":
             # Keep pushing until box is in pit (x ∈ [-0.7, 0.7])
@@ -513,15 +507,11 @@ class AlgSolution:
             self._vel_y = 0.0
             self._vel_z = 0.0
         elif p == "BACK_SIDE":
-            # If box is near pit (box_x > -1.5), stay closer to box
-            # Otherwise, go to y < box_y - 0.3 (south of box)
-            if self.est_box_x is not None and self.est_box_x > -1.5:
-                # Box already pushed far, don't go too far south
-                target_y = 1.0
-            else:
-                target_y = self.BOX_Y - 0.3
+            # Move to y ≈ 0.5 (where the box should be after first push)
+            # Box ends up around y=0.3-0.5 after being pushed
+            target_y = 0.5
             self._vel_x = 0.0
-            self._vel_y = -1.0 if self.est_y > target_y else 0.0  # strafe right if above target
+            self._vel_y = -1.0 if self.est_y > target_y else 0.0  # strafe right until y < 0.5
             self._vel_z = 0.0
         elif p == "PUSH_PIT":
             self._vel_x = 0.8
