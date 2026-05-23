@@ -1,23 +1,20 @@
 """
-Task D: Push box into pit, rotate box 90° first.
+Task D: Push box into pit.
+
+Based on solution_rl.py (working baseline). Only adds:
+  - Phase state machine (with step-based timeouts as fallback)
+  - LiDAR box detection + rotation signal
+  - Box position tracking via LiDAR triangulation
+
+The robot: uses B2Piper locomotion policy (vel_x=0.5 → walks forward).
+The box: starts at (-3, 1.6), must be rotated 90° then pushed into pit.
+The pit: center at x≈-0.2.
 
 Sequence:
-  1. WALK_TO_BOX   → Walk toward box (forward + left) until near box
-  2. PUSH_AND_ROTATE → Push box from +Y side → creates torque → rotates ~90°
-  3. PUSH_TO_PIT   → Push rotated box so corner bridges pit
-  4. CROSS         → Walk across pit using box corner as bridge
-
-Velocity command format (heading_command=True in policy):
-  vel_x = forward speed (m/s)
-  vel_y = heading direction (radians, -π to +π)
-  vel_z = turn rate (rad/s)
-
-For heading=0: robot faces +X (forward toward pit)
-For heading=+1.57: robot faces +Y (left)
-For heading=-1.57: robot faces -Y (right)
-
-Pose estimation: Dead reckoning from base_lin_vel + LiDAR yaw correction.
-Box tracking: LiDAR triangulation (no GT).
+  1. WALK_TO_BOX   → Walk toward box (forward) until LiDAR range < threshold
+  2. ROTATE_BOX    → Push → release cycles. LiDAR rotation signal detects 90° turn
+  3. PUSH_TO_PIT   → Push rotated box toward pit
+  4. CROSS         → Walk across pit (box corner bridges the pit)
 """
 
 import os
@@ -26,6 +23,13 @@ import torch
 
 
 class AlgSolution:
+
+    ACTION_SCALE = 0.5
+    EE_BODY_NAME_CANDIDATES = ("gripper_base", "piper_gripper_base")
+    ARM_JOINT_NAME_CANDIDATES = (
+        ["joint1", "joint2", "joint3", "joint4", "joint5", "joint6"],
+        ["arm_joint1", "arm_joint2", "arm_joint3", "arm_joint4", "arm_joint5", "arm_joint6"],
+    )
 
     def __init__(self):
         policy_path = os.path.dirname(os.path.abspath(__file__)) + '/policy.pt'
@@ -50,65 +54,43 @@ class AlgSolution:
             device=self.device, dtype=torch.float32,
         ).view(1, -1)
 
-        self.arm_default_action = torch.zeros(
-            (1, self.arm_action_dim), device=self.device, dtype=torch.float32,
-        )
-
-        # ── Timing ─────────────────────────────────────────────────────────────
-        self._dt = 0.02  # decimation=4, sim.dt=0.005
-
-        # ── Known initial positions ───────────────────────────────────────────
-        # Robot spawns at (-3, 0), box at (-3, 1.6), pit at x≈-0.2
-        # Robot's initial heading: facing +X (toward pit)
-        self.est_x = -3.0
-        self.est_y = 0.0
-        self.est_yaw = 0.0   # 0 = facing +X (toward pit)
-        self._yaw_correction = 0.0
-        self._wall_bearing_ref = None
-
-        # ── Box pose (LiDAR triangulation) ────────────────────────────────────
-        self.lidar_box = None
-        self.box_x = -3.0
-        self.box_y = 1.6
-        self.box_conf = 1.0  # start from known init
-
-        # ── Rotation signal ────────────────────────────────────────────────────
-        self._rotation_signal = 0.0
-        self._prev_lidar_bearing = None
-        self._bearing_delta_smoothed = 0.0
-
-        # ── Velocity command (heading-based) ───────────────────────────────────
-        # vel_x = forward speed, vel_y = heading (radians), vel_z = turn rate
+        # Fixed velocity command: same as solution_rl.py baseline
         self._vel_x = 0.5
         self._vel_y = 0.0
         self._vel_z = 0.0
 
-        # ── State machine ───────────────────────────────────────────────────────
-        # Robot starts at (-3, 0) facing +X.
-        # Box at (-3, 1.6). Pit at x≈-0.2.
-        # Sequence: approach box → push and rotate → push to pit → cross
+        self.arm_default_action = torch.zeros(
+            (1, self.arm_action_dim), device=self.device, dtype=torch.float32,
+        )
+
+        # ── State machine ────────────────────────────────────────────────────────
+        # vel_x=0.5 means robot walks FORWARD (toward pit direction)
         self.phase = "WALK_TO_BOX"
         self.step = 0
 
-        # ── Phase targets ──────────────────────────────────────────────────────
-        self.BOX_X_APPROACH = -3.0  # robot near this X = close to box
-        self.PIT_X = -0.5           # robot reaches this X = at pit
-        self.CROSS_X = 1.0          # robot reaches this X = across pit
+        # ── Rotation signal ──────────────────────────────────────────────────────
+        self._rotation_signal = 0.0
+        self._prev_lidar_bearing = None
+        self._bearing_delta_smoothed = 0.0
 
-        # Rotation detection
-        self.ROT_SIG_TARGET = 0.8   # accumulated bearing delta threshold
-        self.ROT_PUSH_STEPS = 120    # push for 2.4s
-        self.ROT_RELEASE_STEPS = 60  # release for 1.2s
-        self.MAX_ROT_CYCLES = 12
+        # ── LiDAR box tracking ─────────────────────────────────────────────────
+        self.lidar_box = None
 
         # ── Rotation sub-state ─────────────────────────────────────────────────
         self._rot_cycles = 0
         self._rot_sub = "push"
 
-        # ── Diagnostic ────────────────────────────────────────────────────────
+        # ── Phase parameters ───────────────────────────────────────────────────
+        self.APPROACH_STEPS = 600    # WALK_TO_BOX max steps
+        self.ROT_PUSH_STEPS = 150    # push for 3s
+        self.ROT_RELEASE_STEPS = 60  # release for 1.2s
+        self.ROT_MAX_CYCLES = 15
+        self.ROT_SIG_TARGET = 0.6
+        self.PUSH_STEPS = 500        # PUSH_TO_PIT max steps
+
+        # ── Diagnostic ─────────────────────────────────────────────────────────
         self._last_phase = None
         self._printed_obs = False
-        self._lidar_first_printed = False
 
     # ══════════════════════════════════════════════════════════════════════════
     # LiDAR processing
@@ -184,7 +166,6 @@ class AlgSolution:
         for s, e in clusters:
             width = e - s + 1
             angular_w = float(width) * (2 * math.pi / float(n_bins))
-
             if width < 4 or angular_w < 0.08 or angular_w > 1.2:
                 continue
 
@@ -218,66 +199,8 @@ class AlgSolution:
             "count": width,
         }
 
-    # ══════════════════════════════════════════════════════════════════════════
-    # Pose estimation
-    # ══════════════════════════════════════════════════════════════════════════
-
-    def _update_pose(self, proprio: torch.Tensor) -> None:
-        base_lin = proprio[0, 0:3].cpu().numpy()
-        base_ang = proprio[0, 3:6].cpu().numpy()
-        vx, vy = base_lin[0], base_lin[1]
-        yaw_rate = base_ang[2]
-
-        corrected_yaw = self.est_yaw + self._yaw_correction
-        cos_y = math.cos(corrected_yaw)
-        sin_y = math.sin(corrected_yaw)
-
-        self.est_x += (cos_y * vx - sin_y * vy) * self._dt
-        self.est_y += (sin_y * vx + cos_y * vy) * self._dt
-        self.est_yaw += yaw_rate * self._dt
-
-        while self.est_yaw > math.pi:  self.est_yaw -= 2 * math.pi
-        while self.est_yaw < -math.pi: self.est_yaw += 2 * math.pi
-
-    def _update_yaw_correction(self, lb: dict | None) -> None:
-        if lb is None or lb.get("angular_width", 0) < 1.1:
-            return
-
-        world_bearing = self.est_yaw + lb["bearing"]
-        if self._wall_bearing_ref is None:
-            self._wall_bearing_ref = world_bearing
-            self._yaw_correction = 0.0
-            return
-
-        expected = self._wall_bearing_ref - self.est_yaw
-        drift = lb["bearing"] - expected
-        while drift > math.pi:  drift -= 2 * math.pi
-        while drift < -math.pi: drift += 2 * math.pi
-        self._yaw_correction += 0.04 * drift
-        self._yaw_correction = max(-0.5, min(0.5, self._yaw_correction))
-
-    def _update_box_est(self, lb: dict | None) -> None:
-        if lb is None:
-            self.box_conf = max(0.0, self.box_conf * 0.97)
-            return
-
-        bearing = lb["bearing"]
-        range_m = lb["range"]
-        corrected_yaw = self.est_yaw + self._yaw_correction
-        world_bearing = corrected_yaw + bearing
-
-        cx = self.est_x + math.cos(world_bearing) * range_m
-        cy = self.est_y + math.sin(world_bearing) * range_m
-
-        alpha = 0.15
-        if self.box_conf < 0.1:
-            self.box_x, self.box_y = cx, cy
-        else:
-            self.box_x = (1 - alpha) * self.box_x + alpha * cx
-            self.box_y = (1 - alpha) * self.box_y + alpha * cy
-        self.box_conf = min(1.0, self.box_conf + 0.1)
-
     def _update_rotation_signal(self, lb: dict | None) -> None:
+        """Accumulate LiDAR bearing delta to detect box rotation."""
         if lb is None or self._prev_lidar_bearing is None:
             if lb is not None:
                 self._prev_lidar_bearing = lb["bearing"]
@@ -288,17 +211,65 @@ class AlgSolution:
         while d_bearing < -math.pi: d_bearing += 2 * math.pi
 
         self._bearing_delta_smoothed = 0.6 * self._bearing_delta_smoothed + 0.4 * d_bearing
-
         close_factor = 2.0 / max(0.8, lb["range"])
         self._rotation_signal += self._bearing_delta_smoothed * close_factor
-
         self._prev_lidar_bearing = lb["bearing"]
 
     # ══════════════════════════════════════════════════════════════════════════
-    # Policy interface
+    # State machine
+    # ══════════════════════════════════════════════════════════════════════════
+
+    def _transition(self) -> None:
+        p = self.phase
+        s = self.step
+        lb = self.lidar_box
+
+        if p == "WALK_TO_BOX":
+            # Walk forward (vel_x=0.5) toward box. Transition on close contact.
+            if lb is not None and lb["range"] < 0.8:
+                self.phase = "ROTATE_BOX"
+                self.step = 0
+                self._rot_cycles = 0
+                self._rot_sub = "push"
+                self._rotation_signal = 0.0
+                self._prev_lidar_bearing = None
+                self._bearing_delta_smoothed = 0.0
+            elif s >= self.APPROACH_STEPS:
+                self.phase = "ROTATE_BOX"
+                self.step = 0
+
+        elif p == "ROTATE_BOX":
+            if self._rot_sub == "push":
+                if s >= self.ROT_PUSH_STEPS:
+                    self._rot_sub = "release"
+                    self.step = 0
+            elif self._rot_sub == "release":
+                if s >= self.ROT_RELEASE_STEPS:
+                    self._rot_cycles += 1
+                    if self._rotation_signal >= self.ROT_SIG_TARGET:
+                        self.phase = "PUSH_TO_PIT"
+                        self.step = 0
+                    elif self._rot_cycles >= self.ROT_MAX_CYCLES:
+                        self.phase = "PUSH_TO_PIT"
+                        self.step = 0
+                    else:
+                        self._rot_sub = "push"
+                        self.step = 0
+
+        elif p == "PUSH_TO_PIT":
+            if s >= self.PUSH_STEPS:
+                self.phase = "CROSS"
+                self.step = 0
+
+        elif p == "CROSS":
+            pass
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # Policy interface (EXACTLY mirrors solution_rl.py)
     # ══════════════════════════════════════════════════════════════════════════
 
     def _get_velocity_commands(self, proprio: torch.Tensor) -> torch.Tensor:
+        """Return velocity command as 2D tensor (num_envs, 3)."""
         num_envs = int(proprio.shape[0])
         cmd = torch.tensor(
             [self._vel_x, self._vel_y, self._vel_z],
@@ -309,6 +280,7 @@ class AlgSolution:
         return cmd
 
     def _extract_policy_obs(self, obs, action_dim: int) -> torch.Tensor:
+        """Build 45-dim policy observation. Identical to solution_rl.py."""
         proprio = obs["proprio"].to(self.device)
 
         idx = 0
@@ -357,57 +329,6 @@ class AlgSolution:
         return self._map_policy_action_to_env_action(action_train, action_dim)
 
     # ══════════════════════════════════════════════════════════════════════════
-    # State machine (coordinate-based)
-    # ══════════════════════════════════════════════════════════════════════════
-
-    def _transition(self) -> None:
-        p = self.phase
-        rx, ry = self.est_x, self.est_y
-        lb = self.lidar_box
-
-        if p == "WALK_TO_BOX":
-            # Walk forward toward box. Transition when LiDAR detects close box contact.
-            if lb is not None and lb["range"] < 0.8:
-                # Box is close — we've made contact
-                self.phase = "ROTATE_BOX"
-                self.step = 0
-                self._rot_cycles = 0
-                self._rot_sub = "push"
-                self._rotation_signal = 0.0
-                self._prev_lidar_bearing = None
-                self._bearing_delta_smoothed = 0.0
-            elif self.step >= 600:
-                # Fallback: force advance after max steps
-                self.phase = "ROTATE_BOX"
-                self.step = 0
-
-        elif p == "ROTATE_BOX":
-            if self._rot_sub == "push":
-                if self.step >= self.ROT_PUSH_STEPS:
-                    self._rot_sub = "release"
-                    self.step = 0
-            elif self._rot_sub == "release":
-                if self.step >= self.ROT_RELEASE_STEPS:
-                    self._rot_cycles += 1
-                    if self._rotation_signal >= self.ROT_SIG_TARGET:
-                        self.phase = "PUSH_TO_PIT"
-                        self.step = 0
-                    elif self._rot_cycles >= self.MAX_ROT_CYCLES:
-                        self.phase = "PUSH_TO_PIT"
-                        self.step = 0
-                    else:
-                        self._rot_sub = "push"
-                        self.step = 0
-
-        elif p == "PUSH_TO_PIT":
-            if rx >= self.PIT_X:
-                self.phase = "CROSS"
-                self.step = 0
-
-        elif p == "CROSS":
-            pass
-
-    # ══════════════════════════════════════════════════════════════════════════
     # Main entry point
     # ══════════════════════════════════════════════════════════════════════════
 
@@ -422,61 +343,41 @@ class AlgSolution:
         proprio = obs["proprio"].to(self.device)
         action_dim = (int(proprio.shape[-1]) - 12) // 3
 
-        # ── Sensing ───────────────────────────────────────────────────────────
+        # ── LiDAR sensing ─────────────────────────────────────────────────────
         lb = self._detect_box_lidar(obs)
-        self._update_pose(proprio)
-        self._update_yaw_correction(lb)
-        self._update_box_est(lb)
+        self.lidar_box = lb
         self._update_rotation_signal(lb)
         self._transition()
 
         p = self.phase
 
-        # ── Velocity command per phase ───────────────────────────────────────
-        # heading=0 → face +X (toward pit)
-        # heading=+1.57 → face +Y (left)
-        # heading=-1.57 → face -Y (right)
+        # ── Velocity command: always forward (same as solution_rl.py) ───────
+        # The policy walks in the vel_x direction (heading=0 → toward pit)
         if p == "WALK_TO_BOX":
-            # Walk toward box at (-3, 1.6): forward + face left
             self._vel_x = 0.5
-            self._vel_y = 0.0  # heading=0 = face +X
-            self._vel_z = 0.0
         elif p == "ROTATE_BOX":
-            # Push from +Y side to create rotation torque
-            # Move forward (into box), heading=0 = face +X
             if self._rot_sub == "push":
                 self._vel_x = 0.4
-                self._vel_y = 0.0
-                self._vel_z = 0.0
             else:
-                # Release: slow down
-                self._vel_x = 0.1
-                self._vel_y = 0.0
-                self._vel_z = 0.0
+                self._vel_x = 0.05
         elif p == "PUSH_TO_PIT":
-            # Push box toward pit: move forward
             self._vel_x = 0.5
-            self._vel_y = 0.0
-            self._vel_z = 0.0
         elif p == "CROSS":
-            # Walk across pit
             self._vel_x = 0.4
-            self._vel_y = 0.0
-            self._vel_z = 0.0
+        self._vel_y = 0.0
+        self._vel_z = 0.0
 
         action = self._run_policy(obs, action_dim)
 
-        # ── Log ─────────────────────────────────────────────────────────────
+        # ── Log ──────────────────────────────────────────────────────────────
         if p != self._last_phase:
-            lb_str = (f"bear={lb['bearing']:+.2f} rng={lb['range']:.2f} aw={lb['angular_width']:.2f}"
+            lb_str = (f"rng={lb['range']:.2f} aw={lb['angular_width']:.2f}"
                      if lb else "none")
             rot_sub_str = f" ({self._rot_sub})" if p == "ROTATE_BOX" else ""
             print(
                 f"[D] phase={p:<14}{rot_sub_str} step={self.step:>3}  "
-                f"robot=({self.est_x:+.2f},{self.est_y:+.2f},yaw={self.est_yaw:+.2f})  "
-                f"box=({self.box_x:+.2f},{self.box_y:+.2f}) conf={self.box_conf:.2f}  "
                 f"lidar=[{lb_str}]  rot={self._rotation_signal:+.3f}  "
-                f"cmd=({self._vel_x:+.1f},h={self._vel_y:+.2f})"
+                f"cmd=({self._vel_x:+.2f},{self._vel_y:+.2f})"
             )
             self._last_phase = p
 
