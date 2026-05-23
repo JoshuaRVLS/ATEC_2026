@@ -78,9 +78,9 @@ class AlgSolution:
         self.step = 0
 
         # ── Step limits per phase (fallback) ───────────────────────────────
-        self.BACK_STEPS = 800       # mundur lebih lama
+        self.BACK_STEPS = 800
         self.LEFT_STEPS = 600
-        self.PUSH_RIGHT_STEPS = 600
+        self.PUSH_RIGHT_STEPS = 1000  # push farther to get box near pit
         self.BACK_SIDE_STEPS = 600
         self.PUSH_PIT_STEPS = 700
         self.CROSS_STEPS = 500
@@ -240,15 +240,14 @@ class AlgSolution:
                 self.step = 0
 
         elif p == "PUSH_RIGHT":
-            # Push box in +X direction. Must push until box is well past the pit entry.
-            # Transition when robot X >= -1.5 (box pushed far enough)
-            if rx >= -1.5 or s >= self.PUSH_RIGHT_STEPS:
+            # Push box in +X direction until it reaches the pit area (x >= -0.5)
+            # This requires pushing far enough so the box is properly in the pit
+            if rx >= -0.5 or s >= self.PUSH_RIGHT_STEPS:
                 self.phase = "BACK_SIDE"
                 self.step = 0
 
         elif p == "BACK_SIDE":
-            # Move to y < 1.0 (behind the box, on the other side)
-            # Only transition when robot is truly behind the box
+            # Move to y < 1.0 (behind the box)
             if ry <= 1.0 or s >= self.BACK_SIDE_STEPS:
                 self.phase = "PUSH_PIT"
                 self.step = 0
@@ -332,7 +331,7 @@ class AlgSolution:
             print("OBS KEYS:", list(obs.keys()))
             self._printed_obs = True
 
-        if current_score > 1:
+        if current_score >= 35:
             return {'action': [], 'giveup': True}
 
         proprio = obs["proprio"].to(self.device)
