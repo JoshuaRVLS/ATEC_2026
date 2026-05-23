@@ -88,6 +88,12 @@ class AlgSolution:
         # ── LiDAR ────────────────────────────────────────────────────────────
         self.lidar_box = None
 
+        # ── Box estimator (from LiDAR) ─────────────────────────────────────
+        self.est_box_x = None   # estimated box X in world frame
+        self.est_box_y = None   # estimated box Y in world frame
+        self._prev_lidar_range = None
+        self._box_stuck_counter = 0
+
         # ── Diagnostic ─────────────────────────────────────────────────────
         self._last_phase = None
         self._printed_obs = False
@@ -229,6 +235,71 @@ class AlgSolution:
         }
 
     # ══════════════════════════════════════════════════════════════════════════
+    # Box position estimation (from LiDAR + robot pose)
+    # ══════════════════════════════════════════════════════════════════════════
+
+    def _estimate_box_world_pos(self) -> tuple[float, float] | None:
+        """Estimate box position in WORLD frame using LiDAR + robot pose.
+
+        LiDAR gives us:
+        - bearing: angle from robot forward direction (radians)
+        - range: distance to box (meters)
+
+        Transform from robot frame to world frame using robot pose.
+        """
+        if self.lidar_box is None:
+            return None
+
+        bearing = self.lidar_box['bearing']   # radians from robot forward
+        rng = self.lidar_box['range']         # meters to box
+
+        # Robot frame: +X = forward, +Y = left
+        # Bearing=0 means box is straight ahead (+X in robot frame)
+        # Bearing=+π/2 means box is to the LEFT (+Y in robot frame)
+
+        # Box position in robot frame
+        box_rx = rng * math.cos(bearing)   # forward/back
+        box_ry = rng * math.sin(bearing)   # left/right
+
+        # Transform to world frame using robot pose
+        cos_y = math.cos(self.est_yaw)
+        sin_y = math.sin(self.est_yaw)
+
+        world_dx = cos_y * box_rx - sin_y * box_ry
+        world_dy = sin_y * box_rx + cos_y * box_ry
+
+        self.est_box_x = self.est_x + world_dx
+        self.est_box_y = self.est_y + world_dy
+
+        return self.est_box_x, self.est_box_y
+
+    def _is_box_stuck(self, min_delta: float = 0.02) -> bool:
+        """Detect if box is stuck (range not changing significantly).
+
+        Args:
+            min_delta: minimum range change to consider box moving (meters)
+        """
+        if self.lidar_box is None or self._prev_lidar_range is None:
+            return False
+
+        delta = abs(self.lidar_box['range'] - self._prev_lidar_range)
+        if delta < min_delta:
+            self._box_stuck_counter += 1
+        else:
+            self._box_stuck_counter = 0
+
+        self._prev_lidar_range = self.lidar_box['range']
+
+        # Box is stuck if range hasn't changed for 30+ consecutive frames
+        return self._box_stuck_counter >= 30
+
+    def _is_box_in_pit(self) -> bool:
+        """Check if box is in pit reward zone (x ∈ [-0.7, 0.7])."""
+        if self.est_box_x is None:
+            return False
+        return -0.7 <= self.est_box_x <= 0.7
+
+    # ══════════════════════════════════════════════════════════════════════════
     # State machine (coordinate-based using world position)
     # ══════════════════════════════════════════════════════════════════════════
 
@@ -249,22 +320,41 @@ class AlgSolution:
                 self.step = 0
 
         elif p == "PUSH_RIGHT":
-            # Push box in +X direction until it reaches the pit area (x >= -0.5)
-            # This requires pushing far enough so the box is properly in the pit
-            if rx >= -0.5 or s >= self.PUSH_RIGHT_STEPS:
+            # Use BOX position (from LiDAR) instead of robot position
+            # Box reached pit zone? Check every step
+            if self._is_box_in_pit():
                 self.phase = "BACK_SIDE"
                 self.step = 0
+                return
+            # Box moved enough in X? (box_x >= -0.5 means near pit entrance)
+            if self.est_box_x is not None and self.est_box_x >= -0.5:
+                self.phase = "BACK_SIDE"
+                self.step = 0
+                return
+            # Fallback: step limit
+            if s >= self.PUSH_RIGHT_STEPS:
+                self.phase = "BACK_SIDE"
+                self.step = 0
+                return
 
         elif p == "BACK_SIDE":
-            # Move to y < 1.0 (behind the box)
-            if ry <= 1.0 or s >= self.BACK_SIDE_STEPS:
+            # Use robot position to move to left side of box
+            # Stay at y < box_y - 0.3 (south of box)
+            if ry <= self.BOX_Y - 0.3 or s >= self.BACK_SIDE_STEPS:
                 self.phase = "PUSH_PIT"
                 self.step = 0
 
         elif p == "PUSH_PIT":
+            # Check if box is in pit (primary condition)
+            if self._is_box_in_pit():
+                self.phase = "CROSS"
+                self.step = 0
+                return
+            # Fallback: robot reached X threshold
             if rx >= self.PIT_X or s >= self.PUSH_PIT_STEPS:
                 self.phase = "CROSS"
                 self.step = 0
+                return
 
         elif p == "CROSS":
             pass
@@ -350,6 +440,8 @@ class AlgSolution:
         self._update_pose(proprio)
         lb = self._detect_box_lidar(obs)
         self.lidar_box = lb
+        # ── Box world position estimation ─────────────────────────────────
+        self._estimate_box_world_pos()
         self._transition()
 
         p = self.phase
@@ -385,14 +477,16 @@ class AlgSolution:
 
         action = self._run_policy(obs, action_dim)
 
-        # ── Log ──────────────────────────────────────────────────────────
-        if p != self._last_phase:
+        # ── Log (every 50 steps for detail) ─────────────────────────────────
+        if self.step % 50 == 0:
             lb_str = (f"rng={lb['range']:.2f}" if lb else "none")
+            bx_str = (f"box=({self.est_box_x:+.2f},{self.est_box_y:+.2f})" if self.est_box_x is not None else "box=unk")
+            in_pit = "✓PIT" if self._is_box_in_pit() else ""
+            stuck = "⚠STUCK" if self._is_box_stuck() else ""
             print(
-                f"[D] phase={p:<12}  robot=({self.est_x:+.2f},{self.est_y:+.2f},{math.degrees(self.est_yaw):+.0f}°)  "
-                f"lidar=[{lb_str}]  cmd=(fwd={self._vel_x:+.1f}, str={self._vel_y:+.1f}, hdg={self._vel_z:+.2f})"
+                f"[D] {p:<12} | step={self.step:<4} | robot=({self.est_x:+.2f},{self.est_y:+.2f},{math.degrees(self.est_yaw):+.0f}°) | "
+                f"{bx_str} | lidar=[{lb_str}] | {in_pit}{stuck}"
             )
-            self._last_phase = p
 
         self.step += 1
         return {"action": action.cpu().numpy().tolist(), "giveup": False}
