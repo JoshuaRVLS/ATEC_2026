@@ -382,8 +382,20 @@ class AlgSolution:
                 return
 
         elif p == "BACK_SIDE":
-            # Use dead reckoning: go to y < 0.5
-            if self.est_y <= 0.5 or s >= self.BACK_SIDE_STEPS:
+            # Move to y < 0.5 (south of box, toward pit side)
+            # Use both dead reckoning AND LiDAR bearing to detect position
+            # If LiDAR shows box is to the LEFT (bearing > 0), we're on the wrong side
+            # If LiDAR shows box is to the RIGHT (bearing < 0), we're on the correct side
+            done = False
+            if self.est_y <= 0.5:
+                done = True
+            # Also check LiDAR: if box is to the LEFT, we need to move more right
+            if self.lidar_box and self.lidar_box['bearing'] > 0.2:
+                # Box is to LEFT - we're still too far north, keep strafing
+                done = False
+            if s >= self.BACK_SIDE_STEPS:
+                done = True
+            if done:
                 self.phase = "PUSH_PIT"
                 self.step = 0
 
@@ -504,9 +516,16 @@ class AlgSolution:
             self._vel_y = 0.0
             self._vel_z = 0.0
         elif p == "BACK_SIDE":
-            # Strafe right until y < 0.5
+            # Keep strafing RIGHT until we're past the box
+            # Box should be to our RIGHT (bearing < 0) when we're in correct position
             self._vel_x = 0.0
-            self._vel_y = -1.0 if self.est_y > 0.5 else 0.0
+            # If LiDAR shows box is to LEFT (bearing > 0), keep strafing right
+            if self.lidar_box and self.lidar_box['bearing'] > 0.1:
+                self._vel_y = -1.0
+            elif self.est_y > 0.3:
+                self._vel_y = -1.0  # keep going until y < 0.3
+            else:
+                self._vel_y = 0.0  # stop when aligned
             self._vel_z = 0.0
         elif p == "PUSH_PIT":
             # Forward only
