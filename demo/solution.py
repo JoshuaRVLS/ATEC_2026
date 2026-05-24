@@ -382,20 +382,10 @@ class AlgSolution:
                 return
 
         elif p == "BACK_SIDE":
-            # Move to y < 0.5 (south of box, toward pit side)
-            # Use both dead reckoning AND LiDAR bearing to detect position
-            # If LiDAR shows box is to the LEFT (bearing > 0), we're on the wrong side
-            # If LiDAR shows box is to the RIGHT (bearing < 0), we're on the correct side
-            done = False
-            if self.est_y <= 0.5:
-                done = True
-            # Also check LiDAR: if box is to the LEFT, we need to move more right
-            if self.lidar_box and self.lidar_box['bearing'] > 0.2:
-                # Box is to LEFT - we're still too far north, keep strafing
-                done = False
-            if s >= self.BACK_SIDE_STEPS:
-                done = True
-            if done:
+            # Sequence: back up, then strafe right (go around to back of box)
+            # Use LiDAR to detect when centered behind box (bearing near 0)
+            if self.lidar_box and abs(self.lidar_box['bearing']) < 0.15:
+                # Box is directly ahead → we're centered behind it
                 self.phase = "PUSH_PIT"
                 self.step = 0
 
@@ -516,16 +506,19 @@ class AlgSolution:
             self._vel_y = 0.0
             self._vel_z = 0.0
         elif p == "BACK_SIDE":
-            # Keep strafing RIGHT until we're past the box
-            # Box should be to our RIGHT (bearing < 0) when we're in correct position
-            self._vel_x = 0.0
-            # If LiDAR shows box is to LEFT (bearing > 0), keep strafing right
-            if self.lidar_box and self.lidar_box['bearing'] > 0.1:
+            # Back up then strafe right (go around to back of box)
+            # LiDAR bearing tells us where box is relative to robot
+            # bearing < 0 = box to RIGHT, bearing > 0 = box to LEFT
+            self._vel_x = -0.5  # back up a bit
+            if self.lidar_box and self.lidar_box['bearing'] < -0.2:
+                # Box is to RIGHT - we're getting close, slow down strafe
+                self._vel_y = -0.3
+            elif self.est_x < -2.0:
+                # Still backed up, keep strafe right
                 self._vel_y = -1.0
-            elif self.est_y > 0.3:
-                self._vel_y = -1.0  # keep going until y < 0.3
             else:
-                self._vel_y = 0.0  # stop when aligned
+                # Backed up enough, now strafe right more
+                self._vel_y = -1.0
             self._vel_z = 0.0
         elif p == "PUSH_PIT":
             # Forward only
