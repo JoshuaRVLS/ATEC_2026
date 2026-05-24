@@ -372,14 +372,21 @@ class AlgSolution:
         elif p == "PUSH_RIGHT":
             # Use LiDAR: if range suddenly jumps (>2.5), robot passed the box
             if self._detected_box_pass():
-                self.phase = "BACK_SIDE"
+                self.phase = "RIGHT_ALIGN"
                 self.step = 0
                 return
             # Also transition if box is in pit
             if self.est_box_x is not None and -0.7 <= self.est_box_x <= 0.7:
-                self.phase = "BACK_SIDE"
+                self.phase = "RIGHT_ALIGN"
                 self.step = 0
                 return
+
+        elif p == "RIGHT_ALIGN":
+            # After rotating box, move RIGHT to align with pit
+            # After moving, go to BACK_SIDE to position for second push
+            if s >= 200 or self.est_y >= 1.8:
+                self.phase = "BACK_SIDE"
+                self.step = 0
 
         elif p == "BACK_SIDE":
             # Use LiDAR bearing to detect when centered behind box
@@ -508,6 +515,11 @@ class AlgSolution:
             # Forward only, let the box collision push it
             self._vel_x = 0.8
             self._vel_y = 0.0
+            self._vel_z = 0.0
+        elif p == "RIGHT_ALIGN":
+            # Move RIGHT (toward pit side) to align box with pit
+            self._vel_x = 0.0
+            self._vel_y = -1.0  # strafe RIGHT (toward -Y, toward pit)
             self._vel_z = 0.0
         elif p == "BACK_SIDE":
             # Back up + strafe right (go around to back of box)
