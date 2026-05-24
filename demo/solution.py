@@ -543,12 +543,18 @@ class AlgSolution:
 
         # ── Log every 25 steps ──────────────────────────────────────────────
         if self.step % 25 == 0:
-            bx_str = (f"bx={self.est_box_x:+.1f}" if self.est_box_x is not None else "bx=?")
+            rx = self.est_x
+            ry = self.est_y
+            ryaw = math.degrees(self.est_yaw)
+            bx = self.est_box_x
+            by = self.est_box_y
             pit = "✓" if self._is_box_in_pit() else " "
             passed = "✓" if self._detected_box_pass() else " "
+            brg = f"{math.degrees(self.lidar_box['bearing']):+.0f}°" if self.lidar_box else "---"
+            rng = f"{self.lidar_box['range']:.1f}m" if self.lidar_box else "---"
             print(
-                f"[D]{p:<10}|{self.step:<4}|x={self.est_x:+.1f} y={self.est_y:+.1f} yaw={math.degrees(self.est_yaw):+.0f}°|"
-                f"{bx_str} |pit={pit} pass={passed}"
+                f"[D]{p:<10}|{self.step:<4}|robot=({rx:+.1f},{ry:+.1f},{ryaw:+.0f}°)|"
+                f"box=({bx:+.1f},{by:+.1f})|lidar@brg={brg} rng={rng}|pit={pit}pass={passed}"
             )
 
         self.step += 1
