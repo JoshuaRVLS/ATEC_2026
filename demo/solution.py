@@ -385,10 +385,10 @@ class AlgSolution:
         elif p == "RIGHT_ALIGN":
             # Use LiDAR to detect when box Y is aligned with pit
             # When box bearing is near 0 (box directly ahead), we're aligned
-            if self.lidar_box and abs(self.lidar_box['bearing']) < 0.15 and self.est_y <= 0.5:
+            if self.lidar_box and abs(self.lidar_box['bearing']) < 0.1 and self.est_y <= 0.3:
                 self.phase = "BACK_SIDE"
                 self.step = 0
-            elif s >= 300:  # Fallback: after 300 steps
+            elif s >= 250:  # Fallback: after 250 steps
                 self.phase = "BACK_SIDE"
                 self.step = 0
 
@@ -529,7 +529,7 @@ class AlgSolution:
             self._vel_z = 0.0
         elif p == "RIGHT_ALIGN":
             # Move RIGHT to push box Y toward 0 (align with pit)
-            # Strong yaw correction to ensure box is straight for BACK_SIDE positioning
+            # Strong yaw correction + small forward to stay aligned with box
             self._vel_x = 0.0
             self._vel_y = -1.0  # strafe RIGHT (push box down in Y)
             if abs(self.est_yaw) > 0.05:  # |yaw| > ~3°
@@ -540,7 +540,7 @@ class AlgSolution:
             if self.est_x > -3.0:
                 self._vel_x = -0.8  # back up
                 self._vel_y = 0.0
-            elif self.est_y > -1.5:  # Go SOUTH (negative Y)
+            elif self.est_y > -1.6:  # Go SOUTH (negative Y)
                 self._vel_x = 0.0
                 self._vel_y = -1.0  # strafe right (down in Y)
             else:
