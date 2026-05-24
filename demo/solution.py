@@ -392,15 +392,12 @@ class AlgSolution:
                 self.step = 0
 
         elif p == "BACK_SIDE":
-            # Step 1: First back up (until est_x < -3.0)
-            # Step 2: Then strafe right (until y < 0.3)
-            # Step 3: Then push forward to push box into pit
-            if self.est_x < -3.0 and self.est_y < 0.3:
-                # We're behind the box, ready to push
+            # First back up to x < -3.0
+            # Then strafe right to y < -1.5 (south of box)
+            if self.est_x < -3.0 and self.est_y < -1.5:
                 self.phase = "PUSH_PIT"
                 self.step = 0
             elif s >= self.BACK_SIDE_STEPS:
-                # Fallback
                 self.phase = "PUSH_PIT"
                 self.step = 0
 
@@ -526,15 +523,12 @@ class AlgSolution:
             self._vel_y = -1.0  # strafe RIGHT (push box down in Y)
             self._vel_z = 0.0
         elif p == "BACK_SIDE":
-            # Phase 1: Back up if we're still too far right
             if self.est_x > -3.0:
                 self._vel_x = -0.8  # back up
                 self._vel_y = 0.0
-            # Phase 2: Strafe right to get behind box
-            elif self.est_y > 0.3:
+            elif self.est_y > -1.5:  # Go SOUTH (negative Y)
                 self._vel_x = 0.0
-                self._vel_y = -1.0  # strafe right
-            # Phase 3: We're behind box, ready for push
+                self._vel_y = -1.0  # strafe right (down in Y)
             else:
                 self._vel_x = 0.0
                 self._vel_y = 0.0
