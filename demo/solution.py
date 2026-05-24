@@ -540,9 +540,9 @@ class AlgSolution:
             if self.est_x > -3.0:
                 self._vel_x = -0.8  # back up
                 self._vel_y = 0.0
-            elif self.est_y > 0.8:  # Go SOUTH toward middle of box
+            elif self.est_y > 0.5:  # Go SOUTH toward middle of box (stop earlier)
                 self._vel_x = 0.0
-                self._vel_y = -1.0  # strafe right (down in Y)
+                self._vel_y = -0.6  # strafe right slower for precise positioning
             else:
                 self._vel_x = 0.0
                 self._vel_y = 0.0
