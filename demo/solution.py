@@ -87,14 +87,14 @@ class AlgSolution:
 
         # ── LiDAR ────────────────────────────────────────────────────────────
         self.lidar_box = None
-
-        # ── Box estimator (from LiDAR) ─────────────────────────────────────
-        self.est_box_x = None
-        self.est_box_y = None
         self._prev_lidar_range = None
         self._prev_lidar_bearing = None
         self._range_history = []
         self._MAX_RANGE_HISTORY = 20
+
+        # ── Box estimator ───────────────────────────────────────────────────
+        self.est_box_x = None
+        self.est_box_y = None
 
         # ── Diagnostic ─────────────────────────────────────────────────────
         self._last_phase = None
@@ -357,46 +357,43 @@ class AlgSolution:
     def _transition(self) -> None:
         p = self.phase
         s = self.step
-        rx, ry = self.est_x, self.est_y
 
         if p == "BACK":
-            if rx <= self.BACK_X or s >= self.BACK_STEPS:
+            if self.est_x <= -4.0 or s >= self.BACK_STEPS:
                 self.phase = "LEFT"
                 self.step = 0
 
         elif p == "LEFT":
-            # Go to y > box_y + 0.5 (north/top side of box)
-            if ry >= self.BOX_Y + 0.5 or s >= self.LEFT_STEPS:
+            # Go to y > 2.1 (north of box)
+            if self.est_y >= 2.1 or s >= self.LEFT_STEPS:
                 self.phase = "PUSH_RIGHT"
                 self.step = 0
 
         elif p == "PUSH_RIGHT":
-            # PUSH logic: robot needs to be BEHIND box (x < box_x) to push toward pit (x=0)
-            # Use LiDAR bearing: bearing > 0 means box is to robot's left
-            #                 bearing < 0 means box is to robot's right
-            # If LiDAR says box is ahead (bearing near 0) and range is small, we're in contact
-            if self.lidar_box and abs(self.lidar_box['bearing']) < 0.3 and self.lidar_box['range'] < 1.5:
-                # Box is directly ahead and close - we're pushing, keep going
-                pass
-            # Check if robot has walked PAST the box (should detect by range increasing)
-            if self.lidar_box and self.lidar_box['range'] > 2.5 and self.est_x > -2.5:
-                # Range suddenly increased AND robot is past box location - box must be behind
+            # Use LiDAR: if range suddenly jumps (>2.5), robot passed the box
+            if self._detected_box_pass():
+                self.phase = "BACK_SIDE"
+                self.step = 0
+                return
+            # Also transition if box is in pit
+            if self.est_box_x is not None and -0.7 <= self.est_box_x <= 0.7:
                 self.phase = "BACK_SIDE"
                 self.step = 0
                 return
 
         elif p == "BACK_SIDE":
-            # CRITICAL: Must go to box's Y position before pushing
-            # Box is at y≈0.3, robot is at y≈2.3 - need to align!
-            target_y = self.est_box_y if self.est_box_y is not None else self.BOX_Y
-            # Move to y < box_y (south/behind box from pit's perspective)
-            if ry <= target_y + 0.2 or s >= self.BACK_SIDE_STEPS:
+            # Use dead reckoning: go to y < 0.5
+            if self.est_y <= 0.5 or s >= self.BACK_SIDE_STEPS:
                 self.phase = "PUSH_PIT"
                 self.step = 0
 
         elif p == "PUSH_PIT":
-            # Keep pushing until box is in pit (x ∈ [-0.7, 0.7])
-            if self._is_box_in_pit():
+            # Keep pushing until box is in pit OR box is past robot
+            if self.est_box_x is not None and -0.7 <= self.est_box_x <= 0.7:
+                self.phase = "CROSS"
+                self.step = 0
+                return
+            if self._detected_box_pass():
                 self.phase = "CROSS"
                 self.step = 0
                 return
@@ -491,29 +488,28 @@ class AlgSolution:
 
         p = self.phase
 
-        # ── Velocity command per phase ────────────────────────────────────
-        # vel_x = forward speed in +X world, vel_y = strafe (+=left/+Y, -=right/-Y)
+        # ── Velocity command per phase ──────────────────────────────────────
         if p == "BACK":
-            self._vel_x = -1.0  # fast backward
+            self._vel_x = -1.0
             self._vel_y = 0.0
             self._vel_z = 0.0
         elif p == "LEFT":
-            # Go to y > box_y + 0.5 (north/top side of box) → vel_y = +1.0 (strafe LEFT in +Y)
+            # Strafe left until y > 2.1
             self._vel_x = 0.0
-            self._vel_y = 1.0   # strafe LEFT (+Y direction) to go north of box
+            self._vel_y = 1.0 if self.est_y < 2.1 else 0.0
             self._vel_z = 0.0
         elif p == "PUSH_RIGHT":
-            self._vel_x = 0.8   # moderate forward
+            # Forward only, let the box collision push it
+            self._vel_x = 0.8
             self._vel_y = 0.0
             self._vel_z = 0.0
         elif p == "BACK_SIDE":
-            # Move to y ≈ 0.5 (where the box should be after first push)
-            # Box ends up around y=0.3-0.5 after being pushed
-            target_y = 0.5
+            # Strafe right until y < 0.5
             self._vel_x = 0.0
-            self._vel_y = -1.0 if self.est_y > target_y else 0.0  # strafe right until y < 0.5
+            self._vel_y = -1.0 if self.est_y > 0.5 else 0.0
             self._vel_z = 0.0
         elif p == "PUSH_PIT":
+            # Forward only
             self._vel_x = 0.8
             self._vel_y = 0.0
             self._vel_z = 0.0
@@ -524,16 +520,15 @@ class AlgSolution:
 
         action = self._run_policy(obs, action_dim)
 
-        # ── Log (every step) ──────────────────────────────────────────────────
-        lb_str = (f"rng={lb['range']:.2f}" if lb else "none")
-        bx_str = (f"box=({self.est_box_x:+.2f},{self.est_box_y:+.2f})" if self.est_box_x is not None else "box=unk")
-        box_yaw = (f"yaw={math.degrees(self._estimate_box_yaw() or 0):+.0f}°" if lb else "")
-        in_pit = "✓PIT" if self._is_box_in_pit() else ""
-        passed = "⚠PASS" if self._detected_box_pass() else ""
-        print(
-            f"[D] {p:<12} | {self.step:<4} | robot=({self.est_x:+.2f},{self.est_y:+.2f},{math.degrees(self.est_yaw):+.0f}°) | "
-            f"{bx_str} {box_yaw} | {lb_str} | {in_pit}{passed}"
-        )
+        # ── Log every 25 steps ──────────────────────────────────────────────
+        if self.step % 25 == 0:
+            bx_str = (f"bx={self.est_box_x:+.1f}" if self.est_box_x is not None else "bx=?")
+            pit = "✓" if self._is_box_in_pit() else " "
+            passed = "✓" if self._detected_box_pass() else " "
+            print(
+                f"[D]{p:<10}|{self.step:<4}|x={self.est_x:+.1f} y={self.est_y:+.1f} yaw={math.degrees(self.est_yaw):+.0f}°|"
+                f"{bx_str} |pit={pit} pass={passed}"
+            )
 
         self.step += 1
         return {"action": action.cpu().numpy().tolist(), "giveup": False}
