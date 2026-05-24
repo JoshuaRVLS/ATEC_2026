@@ -392,14 +392,15 @@ class AlgSolution:
                 self.step = 0
 
         elif p == "BACK_SIDE":
-            # Use LiDAR bearing to detect when centered behind box
-            # bearing < 0 = box to RIGHT, bearing > 0 = box to LEFT
-            if self.lidar_box and self.lidar_box['bearing'] < -0.1:
-                # Box is to RIGHT → we're behind the box, good to push
+            # Step 1: First back up (until est_x < -3.0)
+            # Step 2: Then strafe right (until y < 0.3)
+            # Step 3: Then push forward to push box into pit
+            if self.est_x < -3.0 and self.est_y < 0.3:
+                # We're behind the box, ready to push
                 self.phase = "PUSH_PIT"
                 self.step = 0
-            elif self.est_y <= 0.5 or s >= self.BACK_SIDE_STEPS:
-                # Fallback: use dead reckoning
+            elif s >= self.BACK_SIDE_STEPS:
+                # Fallback
                 self.phase = "PUSH_PIT"
                 self.step = 0
 
@@ -525,10 +526,18 @@ class AlgSolution:
             self._vel_y = -1.0  # strafe RIGHT (push box down in Y)
             self._vel_z = 0.0
         elif p == "BACK_SIDE":
-            # Back up + strafe right (go around to back of box)
-            self._vel_x = -0.5  # back up
-            self._vel_y = -1.0  # strafe right
-            self._vel_z = 0.0
+            # Phase 1: Back up if we're still too far right
+            if self.est_x > -3.0:
+                self._vel_x = -0.8  # back up
+                self._vel_y = 0.0
+            # Phase 2: Strafe right to get behind box
+            elif self.est_y > 0.3:
+                self._vel_x = 0.0
+                self._vel_y = -1.0  # strafe right
+            # Phase 3: We're behind box, ready for push
+            else:
+                self._vel_x = 0.0
+                self._vel_y = 0.0
         elif p == "PUSH_PIT":
             # Forward only
             self._vel_x = 0.8
