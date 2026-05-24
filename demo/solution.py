@@ -83,6 +83,7 @@ class AlgSolution:
         self.PUSH_RIGHT_STEPS = 1500  # push longer to get box to pit
         self.BACK_SIDE_STEPS = 600
         self.PUSH_PIT_STEPS = 700
+        self.STABILIZE_STEPS = 250
         self.CROSS_STEPS = 500
 
         # ── LiDAR ────────────────────────────────────────────────────────────
@@ -404,13 +405,22 @@ class AlgSolution:
         elif p == "PUSH_PIT":
             # Keep pushing until box is in pit OR box is past robot
             if self.est_box_x is not None and -0.7 <= self.est_box_x <= 0.7:
-                self.phase = "CROSS"
+                self.phase = "STABILIZE"
                 self.step = 0
                 return
             if self._detected_box_pass():
-                self.phase = "CROSS"
+                self.phase = "STABILIZE"
                 self.step = 0
                 return
+
+        elif p == "STABILIZE":
+            # Wait for robot yaw to stabilize before crossing
+            if abs(self.est_yaw) < 0.15 and s >= 50:
+                self.phase = "CROSS"
+                self.step = 0
+            elif s >= 200:  # Fallback: force cross after 200 steps
+                self.phase = "CROSS"
+                self.step = 0
 
         elif p == "CROSS":
             pass
@@ -519,9 +529,13 @@ class AlgSolution:
             self._vel_z = 0.0
         elif p == "RIGHT_ALIGN":
             # Move RIGHT to push box Y toward 0 (align with pit)
+            # Also correct yaw toward 0 for stability
             self._vel_x = 0.0
             self._vel_y = -1.0  # strafe RIGHT (push box down in Y)
-            self._vel_z = 0.0
+            if abs(self.est_yaw) > 0.1:  # |yaw| > ~6°
+                self._vel_z = -self.est_yaw * 0.5  # correct yaw
+            else:
+                self._vel_z = 0.0
         elif p == "BACK_SIDE":
             if self.est_x > -3.0:
                 self._vel_x = -0.8  # back up
@@ -537,10 +551,22 @@ class AlgSolution:
             self._vel_x = 0.8
             self._vel_y = 0.0
             self._vel_z = 0.0
+        elif p == "STABILIZE":
+            # Stop and correct yaw until stable
+            self._vel_x = 0.0
+            self._vel_y = 0.0
+            if abs(self.est_yaw) > 0.1:
+                self._vel_z = -self.est_yaw * 0.5  # correct yaw
+            else:
+                self._vel_z = 0.0
         elif p == "CROSS":
+            # Cross pit with yaw correction
             self._vel_x = 0.8
             self._vel_y = 0.0
-            self._vel_z = 0.0
+            if abs(self.est_yaw) > 0.1:
+                self._vel_z = -self.est_yaw * 0.5  # correct yaw
+            else:
+                self._vel_z = 0.0
 
         action = self._run_policy(obs, action_dim)
 
