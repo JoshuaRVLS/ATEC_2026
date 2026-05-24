@@ -537,12 +537,20 @@ class AlgSolution:
             else:
                 self._vel_z = 0.0
         elif p == "BACK_SIDE":
-            if self.est_x > -3.0:
-                self._vel_x = -0.8  # back up
+            # Back up to x < -3.2 first
+            # Then strafe right until y < 0.3 (south of box at y=1.6)
+            # Use box position as reference if available
+            target_y = 0.3
+            if self.est_box_y is not None:
+                target_y = (self.est_box_y - 1.3) * 0.5  # south of box
+                target_y = max(-0.5, min(0.5, target_y))  # clamp
+
+            if self.est_x > -3.2:
+                self._vel_x = -0.8
                 self._vel_y = 0.0
-            elif self.est_y > 0.5:  # Go SOUTH toward middle of box (stop earlier)
+            elif self.est_y > target_y:  # Strafe right if not south enough
                 self._vel_x = 0.0
-                self._vel_y = -0.6  # strafe right slower for precise positioning
+                self._vel_y = -0.6
             else:
                 self._vel_x = 0.0
                 self._vel_y = 0.0
