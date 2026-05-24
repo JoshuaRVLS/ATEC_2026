@@ -382,10 +382,14 @@ class AlgSolution:
                 return
 
         elif p == "BACK_SIDE":
-            # Sequence: back up, then strafe right (go around to back of box)
-            # Use LiDAR to detect when centered behind box (bearing near 0)
-            if self.lidar_box and abs(self.lidar_box['bearing']) < 0.15:
-                # Box is directly ahead → we're centered behind it
+            # Use LiDAR bearing to detect when centered behind box
+            # bearing < 0 = box to RIGHT, bearing > 0 = box to LEFT
+            if self.lidar_box and self.lidar_box['bearing'] < -0.1:
+                # Box is to RIGHT → we're behind the box, good to push
+                self.phase = "PUSH_PIT"
+                self.step = 0
+            elif self.est_y <= 0.5 or s >= self.BACK_SIDE_STEPS:
+                # Fallback: use dead reckoning
                 self.phase = "PUSH_PIT"
                 self.step = 0
 
@@ -506,19 +510,9 @@ class AlgSolution:
             self._vel_y = 0.0
             self._vel_z = 0.0
         elif p == "BACK_SIDE":
-            # Back up then strafe right (go around to back of box)
-            # LiDAR bearing tells us where box is relative to robot
-            # bearing < 0 = box to RIGHT, bearing > 0 = box to LEFT
-            self._vel_x = -0.5  # back up a bit
-            if self.lidar_box and self.lidar_box['bearing'] < -0.2:
-                # Box is to RIGHT - we're getting close, slow down strafe
-                self._vel_y = -0.3
-            elif self.est_x < -2.0:
-                # Still backed up, keep strafe right
-                self._vel_y = -1.0
-            else:
-                # Backed up enough, now strafe right more
-                self._vel_y = -1.0
+            # Back up + strafe right (go around to back of box)
+            self._vel_x = -0.5  # back up
+            self._vel_y = -1.0  # strafe right
             self._vel_z = 0.0
         elif p == "PUSH_PIT":
             # Forward only
