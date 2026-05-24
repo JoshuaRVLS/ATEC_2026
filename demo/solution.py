@@ -529,11 +529,11 @@ class AlgSolution:
             self._vel_z = 0.0
         elif p == "RIGHT_ALIGN":
             # Move RIGHT to push box Y toward 0 (align with pit)
-            # Also correct yaw toward 0 for stability
+            # Strong yaw correction to ensure box is straight for BACK_SIDE positioning
             self._vel_x = 0.0
             self._vel_y = -1.0  # strafe RIGHT (push box down in Y)
-            if abs(self.est_yaw) > 0.1:  # |yaw| > ~6°
-                self._vel_z = -self.est_yaw * 0.5  # correct yaw
+            if abs(self.est_yaw) > 0.05:  # |yaw| > ~3°
+                self._vel_z = -self.est_yaw * 1.0  # stronger yaw correction
             else:
                 self._vel_z = 0.0
         elif p == "BACK_SIDE":
