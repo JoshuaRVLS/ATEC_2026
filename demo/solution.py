@@ -22,11 +22,15 @@ import math
 import torch
 
 
+PIT_MIN_X = -0.7
+PIT_MAX_X = 0.7
+
+
 class AlgSolution:
 
     def __init__(self):
         policy_path = os.path.dirname(os.path.abspath(__file__)) + '/policy.pt'
-        self.device = 'cuda'
+        self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
         self.policy = torch.jit.load(policy_path, map_location=self.device)
         self.policy.eval()
@@ -91,6 +95,7 @@ class AlgSolution:
         self._prev_lidar_range = None
         self._prev_lidar_bearing = None
         self._range_history = []
+        self._bearing_history = []
         self._MAX_RANGE_HISTORY = 20
 
         # ── Box estimator ───────────────────────────────────────────────────
@@ -207,24 +212,31 @@ class AlgSolution:
             if width < 4 or angular_w < 0.08 or angular_w > 1.2:
                 continue
 
-            est_range = 1.0 / max(angular_w, 0.01)
-            est_range = max(0.4, min(6.0, est_range))
-
             idxs = torch.arange(s, e + 1, device=self.device) % n_bins
+            cluster_values = horizontal[idxs]
+            cluster_values = cluster_values[cluster_values.isfinite()]
+            if cluster_values.numel() == 0:
+                continue
+
+            cluster_range = cluster_values.median().item()
+            if not math.isfinite(cluster_range) or cluster_range <= 0.0:
+                continue
+            cluster_range = max(0.4, min(6.0, cluster_range))
+
             angles = (idxs.float() / float(n_bins - 1)) * (2 * math.pi) - math.pi
             weights = deviation[idxs].clamp_min(1e-4)
             sin_mean = (weights * torch.sin(angles)).sum() / weights.sum()
             cos_mean = (weights * torch.cos(angles)).sum() / weights.sum()
             bearing = math.atan2(sin_mean.item(), cos_mean.item())
 
-            range_score = 1.0 / (1.0 + 0.5 * abs(est_range - 1.5))
+            range_score = 1.0 / (1.0 + 0.5 * abs(cluster_range - 1.5))
             bearing_score = 1.0 / (1.0 + 0.3 * abs(bearing))
             width_score = math.sqrt(float(width))
             score = width_score * range_score * bearing_score
 
             if score > best_score:
                 best_score = score
-                best = (bearing, est_range, angular_w, width)
+                best = (bearing, cluster_range, angular_w, width)
 
         if best is None:
             return None
@@ -254,8 +266,11 @@ class AlgSolution:
 
         # Track range history for pass-by detection
         self._range_history.append(rng)
+        self._bearing_history.append(bearing)
         if len(self._range_history) > self._MAX_RANGE_HISTORY:
             self._range_history.pop(0)
+        if len(self._bearing_history) > self._MAX_RANGE_HISTORY:
+            self._bearing_history.pop(0)
         self._prev_lidar_range = rng
         self._prev_lidar_bearing = bearing
 
@@ -295,8 +310,11 @@ class AlgSolution:
         avg_recent = sum(recent) / len(recent)
         avg_older = sum(older) / len(older)
 
-        # Range suddenly increased by 1.5m+ → robot passed the box
-        if avg_recent > avg_older + 1.5:
+        recent_bearing = self._bearing_history[-1] if self._bearing_history else 0.0
+
+        # A range jump plus a side/behind bearing is a stronger pass-by signal
+        # than range alone, which can fluctuate as the scan latches onto clutter.
+        if avg_recent > avg_older + 1.5 and abs(recent_bearing) > 0.45:
             return True
 
         return False
@@ -349,7 +367,7 @@ class AlgSolution:
         """Check if box is in pit reward zone (x ∈ [-0.7, 0.7])."""
         if self.est_box_x is None:
             return False
-        return -0.7 <= self.est_box_x <= 0.7
+        return PIT_MIN_X <= self.est_box_x <= PIT_MAX_X
 
     # ══════════════════════════════════════════════════════════════════════════
     # State machine (coordinate-based using world position)
@@ -377,7 +395,11 @@ class AlgSolution:
                 self.step = 0
                 return
             # Also transition if box is in pit
-            if self.est_box_x is not None and -0.7 <= self.est_box_x <= 0.7:
+            if self._is_box_in_pit():
+                self.phase = "RIGHT_ALIGN"
+                self.step = 0
+                return
+            if s >= self.PUSH_RIGHT_STEPS:
                 self.phase = "RIGHT_ALIGN"
                 self.step = 0
                 return
@@ -394,8 +416,8 @@ class AlgSolution:
 
         elif p == "BACK_SIDE":
             # First back up to x < -3.0
-            # Then strafe right to y < -1.5 (south of box)
-            if self.est_x < -3.0 and self.est_y < -1.5:
+            # Then strafe right to y < -0.8 (south of box)
+            if self.est_x < -3.5 and self.est_y < -0.8:
                 self.phase = "PUSH_PIT"
                 self.step = 0
             elif s >= self.BACK_SIDE_STEPS:
@@ -404,11 +426,15 @@ class AlgSolution:
 
         elif p == "PUSH_PIT":
             # Keep pushing until box is in pit OR box is past robot
-            if self.est_box_x is not None and -0.7 <= self.est_box_x <= 0.7:
+            if self._is_box_in_pit():
                 self.phase = "STABILIZE"
                 self.step = 0
                 return
             if self._detected_box_pass():
+                self.phase = "STABILIZE"
+                self.step = 0
+                return
+            if s >= self.PUSH_PIT_STEPS:
                 self.phase = "STABILIZE"
                 self.step = 0
                 return
@@ -418,12 +444,14 @@ class AlgSolution:
             if abs(self.est_yaw) < 0.15 and s >= 50:
                 self.phase = "CROSS"
                 self.step = 0
-            elif s >= 200:  # Fallback: force cross after 200 steps
+            elif s >= self.STABILIZE_STEPS:
                 self.phase = "CROSS"
                 self.step = 0
 
         elif p == "CROSS":
-            pass
+            if self.est_x >= self.PIT_X or s >= self.CROSS_STEPS:
+                self.phase = "DONE"
+                self.step = 0
 
     # ══════════════════════════════════════════════════════════════════════════
     # Policy interface (mirrors solution_rl.py)
@@ -496,9 +524,6 @@ class AlgSolution:
             print("OBS KEYS:", list(obs.keys()))
             self._printed_obs = True
 
-        if current_score >= 35:
-            return {'action': [], 'giveup': True}
-
         proprio = obs["proprio"].to(self.device)
         action_dim = (int(proprio.shape[-1]) - 12) // 3
 
@@ -537,22 +562,16 @@ class AlgSolution:
             else:
                 self._vel_z = 0.0
         elif p == "BACK_SIDE":
-            # Back up to x < -3.2 first
-            # Then strafe right until y < 0.3 (south of box at y=1.6)
-            # Use box position as reference if available
-            target_y = 0.3
-            if self.est_box_y is not None:
-                target_y = (self.est_box_y - 1.3) * 0.5  # south of box
-                target_y = max(-0.5, min(0.5, target_y))  # clamp
-
-            if self.est_x > -3.2:
-                self._vel_x = -0.8
-                self._vel_y = 0.0
-            elif self.est_y > target_y:  # Strafe right if not south enough
-                self._vel_x = 0.0
-                self._vel_y = -0.6
+            # Always do both back AND strafe in this phase
+            # Target: x < -3.5, y < -0.8 (south of box)
+            if self.est_x > -3.5:
+                self._vel_x = -0.7
             else:
                 self._vel_x = 0.0
+
+            if self.est_y > -0.8:
+                self._vel_y = -0.7  # strafe right
+            else:
                 self._vel_y = 0.0
         elif p == "PUSH_PIT":
             # Forward only
@@ -575,6 +594,10 @@ class AlgSolution:
                 self._vel_z = -self.est_yaw * 0.5  # correct yaw
             else:
                 self._vel_z = 0.0
+        elif p == "DONE":
+            self._vel_x = 0.0
+            self._vel_y = 0.0
+            self._vel_z = 0.0
 
         action = self._run_policy(obs, action_dim)
 
@@ -583,15 +606,15 @@ class AlgSolution:
             rx = self.est_x
             ry = self.est_y
             ryaw = math.degrees(self.est_yaw)
-            bx = self.est_box_x
-            by = self.est_box_y
-            pit = "✓" if self._is_box_in_pit() else " "
-            passed = "✓" if self._detected_box_pass() else " "
-            brg = f"{math.degrees(self.lidar_box['bearing']):+.0f}°" if self.lidar_box else "---"
+            bx = f"{self.est_box_x:+.1f}" if self.est_box_x is not None else "---"
+            by = f"{self.est_box_y:+.1f}" if self.est_box_y is not None else "---"
+            pit = "Y" if self._is_box_in_pit() else " "
+            passed = "Y" if self._detected_box_pass() else " "
+            brg = f"{math.degrees(self.lidar_box['bearing']):+.0f}deg" if self.lidar_box else "---"
             rng = f"{self.lidar_box['range']:.1f}m" if self.lidar_box else "---"
             print(
-                f"[D]{p:<10}|{self.step:<4}|robot=({rx:+.1f},{ry:+.1f},{ryaw:+.0f}°)|"
-                f"box=({bx:+.1f},{by:+.1f})|lidar@brg={brg} rng={rng}|pit={pit}pass={passed}"
+                f"[D]{p:<10}|{self.step:<4}|robot=({rx:+.1f},{ry:+.1f},{ryaw:+.0f}deg)|"
+                f"box=({bx},{by})|lidar@brg={brg} rng={rng}|pit={pit}pass={passed}"
             )
 
         self.step += 1
