@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import trimesh
 import numpy as np
+from typing import Any, Callable
 from isaaclab.terrains import (
     SubTerrainBaseCfg,
     TerrainImporterCfg,
@@ -145,6 +146,7 @@ class GroundPlaneCfg(SpawnerCfg):
 
 @configclass
 class BetterTerrainGeneratorCfg(TerrainGeneratorCfg):
+    class_type: Any = None
     terrain_sequence: list[str] | None = None
 
 class BetterTerrainGenerator(TerrainGenerator):
