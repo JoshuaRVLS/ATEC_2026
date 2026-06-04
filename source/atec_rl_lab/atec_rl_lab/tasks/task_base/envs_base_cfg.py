@@ -20,14 +20,13 @@ from isaaclab.utils import configclass
 
 import atec_rl_lab.tasks.task_base.mdp as atec_mdp
 from atec_rl_lab.assets import ATEC_ASSETS_MODEL_DIR
-from atec_rl_lab.assets.robots import ATECArticulationCfg
 from .terrain_base import TerrainImporterCfg
 
 @configclass
 class BaseSceneCfg(InteractiveSceneCfg):
     """Base configuration for the scene."""
     terrain: TerrainImporterCfg = MISSING
-    robot: ArticulationCfg = ATECArticulationCfg
+    robot: ArticulationCfg = MISSING
 
     # Lights
     sky_light = AssetBaseCfg(
