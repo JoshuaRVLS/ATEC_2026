@@ -14,7 +14,7 @@ from isaaclab.terrains.trimesh.utils import make_border
 from isaaclab.utils import configclass
 
 from atec_rl_lab.assets import ATEC_ASSETS_MODEL_DIR
-from atec_rl_lab.tasks.task_base import BetterTerrainGenerator, BetterTerrainImporter
+from atec_rl_lab.tasks.task_base import BetterTerrainGenerator, BetterTerrainGeneratorCfg, BetterTerrainImporter
 
 
 def pit_and_platform_terrain(
@@ -140,7 +140,7 @@ TASK_D_TERRAIN_CFG = TerrainImporterCfg(
     class_type=BetterTerrainImporter,
     prim_path="/World/ground",
     terrain_type="generator",
-    terrain_generator=TerrainGeneratorCfg(
+    terrain_generator=BetterTerrainGeneratorCfg(
         class_type=BetterTerrainGenerator,
         seed=0,
         size=(24.0, 16.0),

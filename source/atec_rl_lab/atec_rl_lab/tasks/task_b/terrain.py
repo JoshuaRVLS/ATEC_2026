@@ -11,7 +11,7 @@ from isaaclab.utils import configclass
 import isaaclab.sim as sim_utils
 from atec_rl_lab.assets import ATEC_ASSETS_MODEL_DIR
 
-from atec_rl_lab.tasks.task_base import BetterTerrainGenerator, BetterTerrainImporter
+from atec_rl_lab.tasks.task_base import BetterTerrainGenerator, BetterTerrainGeneratorCfg, BetterTerrainImporter
 
 def flat_terrain_with_trash_bin(
     difficulty: float, cfg: FlatTerrainWithTrashBinCfg
@@ -84,7 +84,7 @@ TASK_B_TERRAIN_CFG = TerrainImporterCfg(
     class_type=BetterTerrainImporter,
     prim_path="/World/ground",
     terrain_type="generator",
-    terrain_generator=TerrainGeneratorCfg(
+    terrain_generator=BetterTerrainGeneratorCfg(
         class_type=BetterTerrainGenerator,
         seed=0,
         size=(20, 20),
