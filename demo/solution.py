@@ -25,6 +25,7 @@ import torch
 PIT_MIN_X = -0.7
 PIT_MAX_X = 0.7
 DEBUG_START_CROSS = True
+DEBUG_CROSS_MODE = "policy_stand"  # policy_stand | manual_hold | joint_sweep | hybrid_gait
 
 
 class AlgSolution:
@@ -690,6 +691,57 @@ class AlgSolution:
         self._cross_step += 1
         return action
 
+    def _cross_joint_sweep_step(self, action_dim: int) -> torch.Tensor:
+        sweep_period = 50
+        joint_idx = (self._cross_step // sweep_period) % self.leg_action_dim
+        phase = (self._cross_step % sweep_period) / float(sweep_period)
+        amp = 0.10 * math.sin(2.0 * math.pi * phase)
+
+        q_leg = self.q_default_leg.clone()
+        q_leg[0, joint_idx] += amp
+        action = self._q_to_action(q_leg, action_dim)
+
+        if self._cross_step % 25 == 0:
+            leg = self._cross_leg_names[joint_idx // 3]
+            joint = ("hip", "thigh", "calf")[joint_idx % 3]
+            print(
+                f"[CROSS-SWEEP]{self._cross_step:<4}|joint={joint_idx}:{leg}_{joint}|"
+                f"offset={amp:+.3f}"
+            )
+
+        self._cross_step += 1
+        return action
+
+    def _cross_hybrid_gait_step(self, obs, action_dim: int) -> torch.Tensor:
+        baseline = self._run_policy(obs, action_dim)
+        if self._cross_step < self.CROSS_WARMUP_STEPS:
+            if self._cross_step % 25 == 0:
+                print(f"[CROSS-HYBRID]{self._cross_step:<4}|policy warmup")
+            self._cross_step += 1
+            return baseline
+
+        t = (self._cross_step - self.CROSS_WARMUP_STEPS) * self._dt
+        residual = torch.zeros_like(baseline)
+
+        for leg in range(4):
+            phase = (t / self.CROSS_PERIOD + self._cross_phase_offsets[leg]) % 1.0
+            if phase >= self.CROSS_DUTY:
+                swing_phase = (phase - self.CROSS_DUTY) / (1.0 - self.CROSS_DUTY)
+                lift = math.sin(math.pi * max(0.0, min(1.0, swing_phase)))
+                base = 3 * leg
+                residual[0, base + 1] += 0.05 * lift
+                residual[0, base + 2] += 0.08 * lift
+
+        action = baseline + residual
+        if self._cross_step % 25 == 0:
+            print(
+                f"[CROSS-HYBRID]{self._cross_step:<4}|"
+                f"residual_max={float(residual.abs().max().item()):.3f}"
+            )
+
+        self._cross_step += 1
+        return action
+
     # ══════════════════════════════════════════════════════════════════════════
     # Main entry point
     # ══════════════════════════════════════════════════════════════════════════
@@ -762,8 +814,7 @@ class AlgSolution:
             else:
                 self._vel_z = 0.0
         elif p == "CROSS":
-            # Manual gait controller handles crossing; velocity command is not
-            # fed to the policy in this phase.
+            # CROSS debug modes decide whether policy or manual overlay drives.
             self._vel_x = 0.0
             self._vel_y = 0.0
             self._vel_z = 0.0
@@ -773,7 +824,20 @@ class AlgSolution:
             self._vel_z = 0.0
 
         if p == "CROSS":
-            action = self._cross_gait_step(obs, action_dim)
+            if DEBUG_CROSS_MODE == "policy_stand":
+                if self.step % 25 == 0:
+                    print(f"[CROSS-POLICY]{self.step:<4}|stand command")
+                action = self._run_policy(obs, action_dim)
+            elif DEBUG_CROSS_MODE == "manual_hold":
+                if self.step % 25 == 0:
+                    print(f"[CROSS-HOLD]{self.step:<4}|q=default")
+                action = self._q_to_action(self.q_default_leg.clone(), action_dim)
+            elif DEBUG_CROSS_MODE == "joint_sweep":
+                action = self._cross_joint_sweep_step(action_dim)
+            elif DEBUG_CROSS_MODE == "hybrid_gait":
+                action = self._cross_hybrid_gait_step(obs, action_dim)
+            else:
+                action = self._cross_gait_step(obs, action_dim)
         else:
             self._cross_initialized = False
             action = self._run_policy(obs, action_dim)
