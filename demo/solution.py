@@ -78,16 +78,19 @@ class AlgSolution:
         # Simple B2 leg model used only for the manual pit-crossing gait.
         self.IK_THIGH = 0.35
         self.IK_CALF = 0.35
-        self.CROSS_STRIDE = 0.30
-        self.CROSS_CLEARANCE = 0.22
-        self.CROSS_DUTY = 0.75
-        self.CROSS_PERIOD = 1.28  # 0.32 s swing window with 0.75 duty.
+        self.CROSS_WARMUP_STEPS = 50
+        self.CROSS_STRIDE = 0.08
+        self.CROSS_CLEARANCE = 0.06
+        self.CROSS_DUTY = 0.85
+        self.CROSS_PERIOD = 2.0
         self.CROSS_FOOT_Y = 0.18
         self.CROSS_FOOT_Z_BIAS = -0.02
+        self.CROSS_FIXED_HIPS = (-0.12, 0.12, -0.12, 0.12)
         self._cross_leg_names = ("FR", "FL", "RR", "RL")
         self._cross_side = (-1.0, 1.0, -1.0, 1.0)
-        # Offsets make the first crawl cycle swing FR -> RL -> FL -> RR.
-        self._cross_phase_offsets = (0.75, 0.25, 0.0, 0.5)
+        # After warmup, this keeps the first ticks in stance, then swings
+        # FR -> RL -> FL -> RR over the crawl cycle.
+        self._cross_phase_offsets = (0.70, 0.20, 0.95, 0.45)
         self._cross_initialized = False
         self._cross_step = 0
         self._cross_nominal_x = []
@@ -639,7 +642,14 @@ class AlgSolution:
         if not self._cross_initialized:
             self._init_cross_controller(obs, action_dim)
 
-        t = self._cross_step * self._dt
+        if self._cross_step < self.CROSS_WARMUP_STEPS:
+            action = self._q_to_action(self.q_default_leg.clone(), action_dim)
+            if self._cross_step % 25 == 0:
+                print(f"[CROSS-IK]{self._cross_step:<4}|warmup stand|q=default")
+            self._cross_step += 1
+            return action
+
+        t = (self._cross_step - self.CROSS_WARMUP_STEPS) * self._dt
         q_values = []
 
         for leg in range(4):
@@ -657,7 +667,8 @@ class AlgSolution:
                 x = x_mid + 0.5 * self.CROSS_STRIDE - self.CROSS_STRIDE * stance_phase
                 z = z_mid
 
-            hip, thigh, calf = self._leg_ik(x, self.CROSS_FOOT_Y, z, self._cross_side[leg])
+            _, thigh, calf = self._leg_ik(x, self.CROSS_FOOT_Y, z, self._cross_side[leg])
+            hip = self.CROSS_FIXED_HIPS[leg]
             q_values.extend([hip, thigh, calf])
 
         q_leg = torch.tensor([q_values], device=self.device, dtype=torch.float32)
