@@ -24,6 +24,7 @@ import torch
 
 PIT_MIN_X = -0.7
 PIT_MAX_X = 0.7
+DEBUG_START_CROSS = True
 
 
 class AlgSolution:
@@ -55,6 +56,43 @@ class AlgSolution:
             (1, self.arm_action_dim), device=self.device, dtype=torch.float32,
         )
 
+        # ── Manual crossing controller (Task D B2Piper joint order) ────────
+        # Leg order in TaskDEnvB2Cfg: FR, FL, RR, RL; each = hip, thigh, calf.
+        self.manual_action_scale = 0.5
+        self.q_default_leg = torch.tensor(
+            [
+                -0.1, 0.8, -1.5,
+                 0.1, 0.8, -1.5,
+                -0.1, 1.0, -1.5,
+                 0.1, 1.0, -1.5,
+            ],
+            device=self.device, dtype=torch.float32,
+        ).view(1, -1)
+        self.q_min_leg = torch.tensor(
+            [-0.7, 0.15, -2.35] * 4, device=self.device, dtype=torch.float32,
+        ).view(1, -1)
+        self.q_max_leg = torch.tensor(
+            [0.7, 1.55, -0.45] * 4, device=self.device, dtype=torch.float32,
+        ).view(1, -1)
+
+        # Simple B2 leg model used only for the manual pit-crossing gait.
+        self.IK_THIGH = 0.35
+        self.IK_CALF = 0.35
+        self.CROSS_STRIDE = 0.30
+        self.CROSS_CLEARANCE = 0.22
+        self.CROSS_DUTY = 0.75
+        self.CROSS_PERIOD = 1.28  # 0.32 s swing window with 0.75 duty.
+        self.CROSS_FOOT_Y = 0.18
+        self.CROSS_FOOT_Z_BIAS = -0.02
+        self._cross_leg_names = ("FR", "FL", "RR", "RL")
+        self._cross_side = (-1.0, 1.0, -1.0, 1.0)
+        # Offsets make the first crawl cycle swing FR -> RL -> FL -> RR.
+        self._cross_phase_offsets = (0.75, 0.25, 0.0, 0.5)
+        self._cross_initialized = False
+        self._cross_step = 0
+        self._cross_nominal_x = []
+        self._cross_nominal_z = []
+
         # ── Timing ────────────────────────────────────────────────────────
         self._dt = 0.02  # decimation=4, sim.dt=0.005
 
@@ -78,7 +116,7 @@ class AlgSolution:
         self._vel_z = 0.0
 
         # ── State machine ─────────────────────────────────────────────────
-        self.phase = "BACK"
+        self.phase = "CROSS" if DEBUG_START_CROSS else "BACK"
         self.step = 0
 
         # ── Step limits per phase (fallback) ───────────────────────────────
@@ -516,6 +554,132 @@ class AlgSolution:
         return self._map_policy_action_to_env_action(action_train, action_dim)
 
     # ══════════════════════════════════════════════════════════════════════════
+    # Manual crossing controller (gait pattern + swing trajectory + IK)
+    # ══════════════════════════════════════════════════════════════════════════
+
+    def _extract_joint_pos_rel(self, proprio: torch.Tensor, action_dim: int) -> torch.Tensor:
+        idx = 12
+        return proprio[:, idx:idx + action_dim]
+
+    def _q_to_action(self, q_leg: torch.Tensor, action_dim: int) -> torch.Tensor:
+        q_leg = torch.clamp(q_leg, self.q_min_leg, self.q_max_leg)
+        num_envs = q_leg.shape[0]
+        action = torch.zeros((num_envs, action_dim), device=self.device, dtype=torch.float32)
+        action[:, self.leg_joint_indices] = (q_leg - self.q_default_leg) / self.manual_action_scale
+        action[:, self.arm_joint_indices] = self.arm_default_action.repeat(num_envs, 1)
+        return action
+
+    def _init_cross_controller(self, obs, action_dim: int) -> None:
+        proprio = obs["proprio"].to(self.device)
+        joint_pos_rel = self._extract_joint_pos_rel(proprio, action_dim)
+        q_now = joint_pos_rel[:, self.leg_joint_indices] + self.q_default_leg
+        q_now = q_now[0].detach().clamp(self.q_min_leg[0], self.q_max_leg[0])
+
+        self._cross_nominal_x = []
+        self._cross_nominal_z = []
+        for leg in range(4):
+            qh = float(q_now[3 * leg + 0].item())
+            qt = float(q_now[3 * leg + 1].item())
+            qc = float(q_now[3 * leg + 2].item())
+            reach_x = (
+                self.IK_THIGH * math.sin(qt)
+                + self.IK_CALF * math.sin(qt + qc)
+            )
+            reach_z = -(
+                self.IK_THIGH * math.cos(qt)
+                + self.IK_CALF * math.cos(qt + qc)
+            )
+            # Keep the first manual command near the current pose, then let the
+            # crawl gait slowly walk the feet backward relative to the body.
+            self._cross_nominal_x.append(max(-0.16, min(0.16, reach_x)))
+            self._cross_nominal_z.append(max(-0.62, min(-0.42, reach_z + self.CROSS_FOOT_Z_BIAS)))
+            if not math.isfinite(qh):
+                self._cross_nominal_x[-1] = 0.0
+
+        self._cross_step = 0
+        self._cross_initialized = True
+
+    def _swing_traj(
+        self,
+        x0: float,
+        x1: float,
+        z0: float,
+        clearance: float,
+        phase: float,
+    ) -> tuple[float, float]:
+        phase = max(0.0, min(1.0, phase))
+        smooth = 0.5 - 0.5 * math.cos(math.pi * phase)
+        x = x0 + (x1 - x0) * smooth
+        z = z0 + clearance * math.sin(math.pi * phase)
+        return x, z
+
+    def _leg_ik(self, x: float, y: float, z: float, side: float) -> tuple[float, float, float]:
+        side_y = side * max(0.08, abs(y))
+        hip = math.atan2(side_y, max(0.18, -z)) - math.atan2(side * self.CROSS_FOOT_Y, 0.55)
+        hip *= 0.55
+
+        l1 = self.IK_THIGH
+        l2 = self.IK_CALF
+        px = x
+        pz = z
+        dist = math.sqrt(px * px + pz * pz)
+        dist = max(0.20, min(l1 + l2 - 0.02, dist))
+
+        cos_knee = (dist * dist - l1 * l1 - l2 * l2) / (2.0 * l1 * l2)
+        cos_knee = max(-0.98, min(0.98, cos_knee))
+        calf = -math.acos(cos_knee)
+
+        alpha = math.atan2(px, -pz)
+        beta = math.atan2(l2 * math.sin(-calf), l1 + l2 * math.cos(-calf))
+        thigh = alpha + beta
+
+        return hip, thigh, calf
+
+    def _cross_gait_step(self, obs, action_dim: int) -> torch.Tensor:
+        if not self._cross_initialized:
+            self._init_cross_controller(obs, action_dim)
+
+        t = self._cross_step * self._dt
+        q_values = []
+
+        for leg in range(4):
+            phase = (t / self.CROSS_PERIOD + self._cross_phase_offsets[leg]) % 1.0
+            swing_phase = (phase - self.CROSS_DUTY) / (1.0 - self.CROSS_DUTY)
+            x_mid = self._cross_nominal_x[leg]
+            z_mid = self._cross_nominal_z[leg]
+
+            if phase >= self.CROSS_DUTY:
+                x0 = x_mid - 0.5 * self.CROSS_STRIDE
+                x1 = x_mid + 0.5 * self.CROSS_STRIDE
+                x, z = self._swing_traj(x0, x1, z_mid, self.CROSS_CLEARANCE, swing_phase)
+            else:
+                stance_phase = phase / self.CROSS_DUTY
+                x = x_mid + 0.5 * self.CROSS_STRIDE - self.CROSS_STRIDE * stance_phase
+                z = z_mid
+
+            hip, thigh, calf = self._leg_ik(x, self.CROSS_FOOT_Y, z, self._cross_side[leg])
+            q_values.extend([hip, thigh, calf])
+
+        q_leg = torch.tensor([q_values], device=self.device, dtype=torch.float32)
+        q_leg = torch.nan_to_num(q_leg, nan=0.0, posinf=0.0, neginf=0.0)
+        action = self._q_to_action(q_leg, action_dim)
+
+        if self._cross_step % 25 == 0:
+            swing_names = []
+            for leg in range(4):
+                phase = (t / self.CROSS_PERIOD + self._cross_phase_offsets[leg]) % 1.0
+                if phase >= self.CROSS_DUTY:
+                    swing_names.append(self._cross_leg_names[leg])
+            swing_txt = ",".join(swing_names) if swing_names else "-"
+            print(
+                f"[CROSS-IK]{self._cross_step:<4}|swing={swing_txt}|"
+                f"q={q_leg[0].detach().cpu().numpy().round(2).tolist()}"
+            )
+
+        self._cross_step += 1
+        return action
+
+    # ══════════════════════════════════════════════════════════════════════════
     # Main entry point
     # ══════════════════════════════════════════════════════════════════════════
 
@@ -587,19 +751,21 @@ class AlgSolution:
             else:
                 self._vel_z = 0.0
         elif p == "CROSS":
-            # Cross pit with yaw correction
-            self._vel_x = 0.8
+            # Manual gait controller handles crossing; velocity command is not
+            # fed to the policy in this phase.
+            self._vel_x = 0.0
             self._vel_y = 0.0
-            if abs(self.est_yaw) > 0.1:
-                self._vel_z = -self.est_yaw * 0.5  # correct yaw
-            else:
-                self._vel_z = 0.0
+            self._vel_z = 0.0
         elif p == "DONE":
             self._vel_x = 0.0
             self._vel_y = 0.0
             self._vel_z = 0.0
 
-        action = self._run_policy(obs, action_dim)
+        if p == "CROSS":
+            action = self._cross_gait_step(obs, action_dim)
+        else:
+            self._cross_initialized = False
+            action = self._run_policy(obs, action_dim)
 
         # ── Log every 25 steps ──────────────────────────────────────────────
         if self.step % 25 == 0:
