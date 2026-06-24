@@ -11,8 +11,8 @@ Sequence (coordinate-based):
   2. LEFT      → walk to the upper/off-center corner of the box
   3. ROTATE_BOX→ push one end so the box rotates from ___ toward |
   4. PUSH_PIT  → push box into the reward x-range
-  5. GO_PLATFORM → move to the upper/platform lane
-  6. CROSS     → cross from the platform lane, not the pit center
+  5. ALIGN_BOX → line up behind the box after it falls into the pit
+  6. CROSS     → step onto the box and cross slowly
 
 Transitions use actual robot WORLD POSITION (from dead reckoning).
 """
@@ -68,12 +68,11 @@ class AlgSolution:
         self.ROTATE_Y = self.BOX_Y + 0.42  # hit the upper end, not the center
         self.ROTATE_X_STOP = -2.25  # stop before sliding the box into the wall
         self.PIT_PUSH_Y = self.BOX_Y + 0.25
-        self.PLATFORM_Y = 2.55
-        self.PLATFORM_X = -2.0
-        self.BACK_SIDE_X = -3.4
+        self.ALIGN_X = -1.55
+        self.BOX_CROSS_Y = self.BOX_Y
         self.ALIGN_YAW_TOL = 0.15
         self.BACK_X = -4.0    # back up farther
-        self.PIT_X = 2.2      # cross pit/platform until this X
+        self.PIT_X = 2.2      # cross pit until this X
 
         # ── Velocity command ───────────────────────────────────────────────
         # Convention (from testing):
@@ -95,7 +94,7 @@ class AlgSolution:
         self.RIGHT_ALIGN_STEPS = 250
         self.BACK_SIDE_STEPS = 250
         self.PUSH_PIT_STEPS = 700
-        self.GO_PLATFORM_STEPS = 500
+        self.ALIGN_BOX_STEPS = 450
         self.STABILIZE_STEPS = 250
         self.CROSS_STEPS = 700
 
