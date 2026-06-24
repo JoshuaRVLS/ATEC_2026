@@ -25,7 +25,7 @@ import torch
 PIT_MIN_X = -0.7
 PIT_MAX_X = 0.7
 DEBUG_START_CROSS = True
-DEBUG_CROSS_MODE = "policy_stand"  # policy_stand | manual_hold | joint_sweep | hybrid_gait
+DEBUG_CROSS_MODE = "ik_visual"  # policy_stand | manual_hold | joint_sweep | hybrid_gait | ik_visual
 
 
 class AlgSolution:
@@ -742,6 +742,44 @@ class AlgSolution:
         self._cross_step += 1
         return action
 
+    def _cross_ik_visual_step(self, obs, action_dim: int) -> torch.Tensor:
+        baseline = self._run_policy(obs, action_dim)
+
+        leg = 0  # FR: easiest to see from the default camera side.
+        side = self._cross_side[leg]
+        base = 3 * leg
+        t = self._cross_step * self._dt
+        cycle = (t % 2.0) / 2.0
+        pulse = 0.5 - 0.5 * math.cos(2.0 * math.pi * cycle)
+
+        x = 0.00 + 0.04 * math.sin(2.0 * math.pi * cycle)
+        y = self.CROSS_FOOT_Y
+        z = -0.52 + 0.08 * pulse
+        hip, thigh, calf = self._leg_ik(x, y, z, side)
+        hip = self.CROSS_FIXED_HIPS[leg]
+
+        q_target = torch.tensor(
+            [[hip, thigh, calf]],
+            device=self.device,
+            dtype=torch.float32,
+        )
+        q_default = self.q_default_leg[:, base:base + 3]
+        desired_env_action = (q_target - q_default) / self.manual_action_scale
+        residual = torch.zeros_like(baseline)
+        residual[:, base:base + 3] = 0.20 * desired_env_action
+
+        action = baseline + residual
+
+        if self._cross_step % 10 == 0:
+            print(
+                f"[IK-VIS]{self._cross_step:<4}|leg=FR|foot=({x:+.2f},{y:+.2f},{z:+.2f})|"
+                f"q=({hip:+.2f},{thigh:+.2f},{calf:+.2f})|"
+                f"res={residual[0, base:base + 3].detach().cpu().numpy().round(3).tolist()}"
+            )
+
+        self._cross_step += 1
+        return action
+
     # ══════════════════════════════════════════════════════════════════════════
     # Main entry point
     # ══════════════════════════════════════════════════════════════════════════
@@ -836,6 +874,8 @@ class AlgSolution:
                 action = self._cross_joint_sweep_step(action_dim)
             elif DEBUG_CROSS_MODE == "hybrid_gait":
                 action = self._cross_hybrid_gait_step(obs, action_dim)
+            elif DEBUG_CROSS_MODE == "ik_visual":
+                action = self._cross_ik_visual_step(obs, action_dim)
             else:
                 action = self._cross_gait_step(obs, action_dim)
         else:
