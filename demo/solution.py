@@ -8,11 +8,12 @@ World layout:
 
 Sequence (coordinate-based):
   1. BACK      → back up from box for clearance
-  2. LEFT      → walk to Y > box_Y (left side of box)
-  3. PUSH_RIGHT→ push box in +X direction
-  4. BACK_SIDE → back up to Y < box_Y (behind box)
-  5. PUSH_PIT  → push rotated box into pit
-  6. CROSS     → walk across pit
+  2. LEFT      → walk to the upper/off-center corner of the box
+  3. ROTATE_BOX→ push one end so the box rotates from ___ toward |
+  4. RIGHT_ALIGN → move down alongside the rotated box
+  5. BACK_SIDE → back up to Y < box_Y (behind box)
+  6. PUSH_PIT  → push rotated box into pit
+  7. CROSS     → walk across pit
 
 Transitions use actual robot WORLD POSITION (from dead reckoning).
 """
@@ -65,6 +66,11 @@ class AlgSolution:
 
         # ── Box target Y (from known init position) ────────────────────────
         self.BOX_Y = 1.6      # box's Y position
+        self.ROTATE_Y = self.BOX_Y + 0.42  # hit the upper end, not the center
+        self.ROTATE_X_STOP = -2.25  # stop before sliding the box into the wall
+        self.PIT_ALIGN_Y = 0.25
+        self.BACK_SIDE_X = -3.5
+        self.BACK_SIDE_Y = -0.75
         self.BACK_X = -4.0    # back up farther
         self.PIT_X = 1.5      # cross pit until this X
 
@@ -84,7 +90,8 @@ class AlgSolution:
         # ── Step limits per phase (fallback) ───────────────────────────────
         self.BACK_STEPS = 800
         self.LEFT_STEPS = 600
-        self.PUSH_RIGHT_STEPS = 1500  # push longer to get box to pit
+        self.ROTATE_BOX_STEPS = 280
+        self.RIGHT_ALIGN_STEPS = 350
         self.BACK_SIDE_STEPS = 600
         self.PUSH_PIT_STEPS = 700
         self.STABILIZE_STEPS = 250
@@ -383,41 +390,37 @@ class AlgSolution:
                 self.step = 0
 
         elif p == "LEFT":
-            # Go to y > 2.1 (north of box)
-            if self.est_y >= 2.1 or s >= self.LEFT_STEPS:
-                self.phase = "PUSH_RIGHT"
+            # Aim above the box centerline so the +X push creates torque.
+            if self.est_y >= self.ROTATE_Y or s >= self.LEFT_STEPS:
+                self.phase = "ROTATE_BOX"
                 self.step = 0
 
-        elif p == "PUSH_RIGHT":
-            # Use LiDAR: if range suddenly jumps (>2.5), robot passed the box
-            if self._detected_box_pass():
+        elif p == "ROTATE_BOX":
+            # This is intentionally short/off-center. A centerline push just
+            # translates the box; pushing the upper end should rotate it.
+            if self.est_x >= self.ROTATE_X_STOP:
                 self.phase = "RIGHT_ALIGN"
                 self.step = 0
                 return
-            # Also transition if box is in pit
-            if self._is_box_in_pit():
-                self.phase = "RIGHT_ALIGN"
-                self.step = 0
-                return
-            if s >= self.PUSH_RIGHT_STEPS:
+            if s >= self.ROTATE_BOX_STEPS:
                 self.phase = "RIGHT_ALIGN"
                 self.step = 0
                 return
 
         elif p == "RIGHT_ALIGN":
-            # Use LiDAR to detect when box Y is aligned with pit
-            # When box bearing is near 0 (box directly ahead), we're aligned
-            if self.lidar_box and abs(self.lidar_box['bearing']) < 0.1 and self.est_y <= 0.3:
+            # Move down after the corner push, then back up for the final +X shove.
+            # LiDAR is noisy here, so use robot pose as the primary guard.
+            if self.est_y <= self.PIT_ALIGN_Y:
                 self.phase = "BACK_SIDE"
                 self.step = 0
-            elif s >= 250:  # Fallback: after 250 steps
+            elif s >= self.RIGHT_ALIGN_STEPS:
                 self.phase = "BACK_SIDE"
                 self.step = 0
 
         elif p == "BACK_SIDE":
             # First back up to x < -3.0
             # Then strafe right to y < -0.8 (south of box)
-            if self.est_x < -3.5 and self.est_y < -0.8:
+            if self.est_x < self.BACK_SIDE_X and self.est_y < self.BACK_SIDE_Y:
                 self.phase = "PUSH_PIT"
                 self.step = 0
             elif s >= self.BACK_SIDE_STEPS:
@@ -543,40 +546,46 @@ class AlgSolution:
             self._vel_y = 0.0
             self._vel_z = 0.0
         elif p == "LEFT":
-            # Strafe left until y > 2.1
+            # Strafe left to the upper box corner before the rotation push.
             self._vel_x = 0.0
-            self._vel_y = 1.0 if self.est_y < 2.1 else 0.0
+            self._vel_y = 0.75 if self.est_y < self.ROTATE_Y else 0.0
             self._vel_z = 0.0
-        elif p == "PUSH_RIGHT":
-            # Forward only, let the box collision push it
-            self._vel_x = 0.8
-            self._vel_y = 0.0
-            self._vel_z = 0.0
+        elif p == "ROTATE_BOX":
+            # Push one end of the box. A slight downward bias keeps contact on
+            # the corner instead of riding along the side/wall.
+            self._vel_x = 0.45
+            y_err = self.ROTATE_Y - self.est_y
+            self._vel_y = max(-0.35, min(0.25, 1.0 * y_err - 0.10))
+            if abs(self.est_yaw) > 0.08:
+                self._vel_z = -self.est_yaw * 0.7
+            else:
+                self._vel_z = 0.0
         elif p == "RIGHT_ALIGN":
-            # Move RIGHT to push box Y toward 0 (align with pit)
-            # Strong yaw correction + small forward to stay aligned with box
-            self._vel_x = 0.0
-            self._vel_y = -1.0  # strafe RIGHT (push box down in Y)
+            # Move RIGHT to get below the rotated box before the final pit push.
+            self._vel_x = -0.10 if self.est_x > -3.0 else 0.0
+            self._vel_y = -0.75  # strafe RIGHT/down in Y
             if abs(self.est_yaw) > 0.05:  # |yaw| > ~3°
-                self._vel_z = -self.est_yaw * 1.0  # stronger yaw correction
+                self._vel_z = -self.est_yaw * 0.9
             else:
                 self._vel_z = 0.0
         elif p == "BACK_SIDE":
             # Always do both back AND strafe in this phase
             # Target: x < -3.5, y < -0.8 (south of box)
-            if self.est_x > -3.5:
+            if self.est_x > self.BACK_SIDE_X:
                 self._vel_x = -0.7
             else:
                 self._vel_x = 0.0
 
-            if self.est_y > -0.8:
+            if self.est_y > self.BACK_SIDE_Y:
                 self._vel_y = -0.7  # strafe right
             else:
                 self._vel_y = 0.0
         elif p == "PUSH_PIT":
-            # Forward only
-            self._vel_x = 0.8
-            self._vel_y = 0.0
+            # Final shove: keep the robot roughly centered on the lower side of
+            # the now-rotated box so contact does not peel off diagonally.
+            self._vel_x = 0.65
+            y_err = self.PIT_ALIGN_Y - self.est_y
+            self._vel_y = max(-0.30, min(0.30, 0.8 * y_err))
             self._vel_z = 0.0
         elif p == "STABILIZE":
             # Stop and correct yaw until stable
