@@ -71,6 +71,7 @@ class AlgSolution:
         self.PIT_ALIGN_Y = 0.25
         self.BACK_SIDE_X = -3.5
         self.BACK_SIDE_Y = -0.75
+        self.ALIGN_YAW_TOL = 0.15
         self.BACK_X = -4.0    # back up farther
         self.PIT_X = 1.5      # cross pit until this X
 
@@ -460,6 +461,19 @@ class AlgSolution:
     # Policy interface (mirrors solution_rl.py)
     # ══════════════════════════════════════════════════════════════════════════
 
+    def _set_body_velocity(self, vx: float, vy: float, wz: float) -> None:
+        self._vel_x = vx
+        self._vel_y = vy
+        self._vel_z = wz
+
+    def _set_world_velocity(self, vx: float, vy: float, wz: float) -> None:
+        """Convert desired world XY velocity into the policy's body-frame command."""
+        cos_y = math.cos(self.est_yaw)
+        sin_y = math.sin(self.est_yaw)
+        self._vel_x = cos_y * vx + sin_y * vy
+        self._vel_y = -sin_y * vx + cos_y * vy
+        self._vel_z = wz
+
     def _get_velocity_commands(self, proprio: torch.Tensor) -> torch.Tensor:
         num_envs = int(proprio.shape[0])
         cmd = torch.tensor(
@@ -542,71 +556,52 @@ class AlgSolution:
 
         # ── Velocity command per phase ──────────────────────────────────────
         if p == "BACK":
-            self._vel_x = -1.0
-            self._vel_y = 0.0
-            self._vel_z = 0.0
+            self._set_body_velocity(-1.0, 0.0, 0.0)
         elif p == "LEFT":
             # Strafe left to the upper box corner before the rotation push.
-            self._vel_x = 0.0
-            self._vel_y = 0.75 if self.est_y < self.ROTATE_Y else 0.0
-            self._vel_z = 0.0
+            self._set_body_velocity(0.0, 0.75 if self.est_y < self.ROTATE_Y else 0.0, 0.0)
         elif p == "ROTATE_BOX":
             # Push one end of the box. A slight downward bias keeps contact on
             # the corner instead of riding along the side/wall.
-            self._vel_x = 0.45
             y_err = self.ROTATE_Y - self.est_y
-            self._vel_y = max(-0.35, min(0.25, 1.0 * y_err - 0.10))
             if abs(self.est_yaw) > 0.08:
-                self._vel_z = -self.est_yaw * 0.7
+                wz = -self.est_yaw * 0.7
             else:
-                self._vel_z = 0.0
+                wz = 0.0
+            self._set_body_velocity(0.45, max(-0.35, min(0.25, 1.0 * y_err - 0.10)), wz)
         elif p == "RIGHT_ALIGN":
-            # Move RIGHT to get below the rotated box before the final pit push.
-            self._vel_x = -0.10 if self.est_x > -3.0 else 0.0
-            self._vel_y = -0.75  # strafe RIGHT/down in Y
-            if abs(self.est_yaw) > 0.05:  # |yaw| > ~3°
-                self._vel_z = -self.est_yaw * 0.9
+            # First square the robot back to world +X. If we strafe while yawed,
+            # the body-frame command can become forward motion into the wall.
+            if abs(self.est_yaw) > self.ALIGN_YAW_TOL:
+                self._set_body_velocity(0.0, 0.0, -self.est_yaw * 1.2)
             else:
-                self._vel_z = 0.0
+                self._set_world_velocity(0.0, -0.70, -self.est_yaw * 0.5)
         elif p == "BACK_SIDE":
             # Always do both back AND strafe in this phase
             # Target: x < -3.5, y < -0.8 (south of box)
-            if self.est_x > self.BACK_SIDE_X:
-                self._vel_x = -0.7
-            else:
-                self._vel_x = 0.0
-
-            if self.est_y > self.BACK_SIDE_Y:
-                self._vel_y = -0.7  # strafe right
-            else:
-                self._vel_y = 0.0
+            vx = -0.65 if self.est_x > self.BACK_SIDE_X else 0.0
+            vy = -0.65 if self.est_y > self.BACK_SIDE_Y else 0.0
+            self._set_world_velocity(vx, vy, -self.est_yaw * 0.5)
         elif p == "PUSH_PIT":
             # Final shove: keep the robot roughly centered on the lower side of
             # the now-rotated box so contact does not peel off diagonally.
-            self._vel_x = 0.65
             y_err = self.PIT_ALIGN_Y - self.est_y
-            self._vel_y = max(-0.30, min(0.30, 0.8 * y_err))
-            self._vel_z = 0.0
+            self._set_world_velocity(0.65, max(-0.30, min(0.30, 0.8 * y_err)), -self.est_yaw * 0.4)
         elif p == "STABILIZE":
             # Stop and correct yaw until stable
-            self._vel_x = 0.0
-            self._vel_y = 0.0
             if abs(self.est_yaw) > 0.1:
-                self._vel_z = -self.est_yaw * 0.5  # correct yaw
+                self._set_body_velocity(0.0, 0.0, -self.est_yaw * 0.5)
             else:
-                self._vel_z = 0.0
+                self._set_body_velocity(0.0, 0.0, 0.0)
         elif p == "CROSS":
             # Cross pit with yaw correction
-            self._vel_x = 0.8
-            self._vel_y = 0.0
             if abs(self.est_yaw) > 0.1:
-                self._vel_z = -self.est_yaw * 0.5  # correct yaw
+                wz = -self.est_yaw * 0.5
             else:
-                self._vel_z = 0.0
+                wz = 0.0
+            self._set_world_velocity(0.8, 0.0, wz)
         elif p == "DONE":
-            self._vel_x = 0.0
-            self._vel_y = 0.0
-            self._vel_z = 0.0
+            self._set_body_velocity(0.0, 0.0, 0.0)
 
         action = self._run_policy(obs, action_dim)
 
