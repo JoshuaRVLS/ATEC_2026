@@ -10,10 +10,9 @@ Sequence (coordinate-based):
   1. BACK      → back up from box for clearance
   2. LEFT      → walk to the upper/off-center corner of the box
   3. ROTATE_BOX→ push one end so the box rotates from ___ toward |
-  4. RIGHT_ALIGN → move down alongside the rotated box
-  5. BACK_SIDE → back up to Y < box_Y (behind box)
-  6. PUSH_PIT  → push rotated box into pit
-  7. CROSS     → walk across pit
+  4. PUSH_PIT  → push box into the reward x-range
+  5. GO_PLATFORM → move to the upper/platform lane
+  6. CROSS     → cross from the platform lane, not the pit center
 
 Transitions use actual robot WORLD POSITION (from dead reckoning).
 """
@@ -68,12 +67,13 @@ class AlgSolution:
         self.BOX_Y = 1.6      # box's Y position
         self.ROTATE_Y = self.BOX_Y + 0.42  # hit the upper end, not the center
         self.ROTATE_X_STOP = -2.25  # stop before sliding the box into the wall
-        self.PIT_ALIGN_Y = 0.25
-        self.BACK_SIDE_X = -3.5
-        self.BACK_SIDE_Y = -0.75
+        self.PIT_PUSH_Y = self.BOX_Y + 0.25
+        self.PLATFORM_Y = 2.55
+        self.PLATFORM_X = -2.0
+        self.BACK_SIDE_X = -3.4
         self.ALIGN_YAW_TOL = 0.15
         self.BACK_X = -4.0    # back up farther
-        self.PIT_X = 1.5      # cross pit until this X
+        self.PIT_X = 2.2      # cross pit/platform until this X
 
         # ── Velocity command ───────────────────────────────────────────────
         # Convention (from testing):
@@ -92,11 +92,12 @@ class AlgSolution:
         self.BACK_STEPS = 800
         self.LEFT_STEPS = 600
         self.ROTATE_BOX_STEPS = 280
-        self.RIGHT_ALIGN_STEPS = 350
-        self.BACK_SIDE_STEPS = 600
+        self.RIGHT_ALIGN_STEPS = 250
+        self.BACK_SIDE_STEPS = 250
         self.PUSH_PIT_STEPS = 700
+        self.GO_PLATFORM_STEPS = 500
         self.STABILIZE_STEPS = 250
-        self.CROSS_STEPS = 500
+        self.CROSS_STEPS = 700
 
         # ── LiDAR ────────────────────────────────────────────────────────────
         self.lidar_box = None
@@ -407,48 +408,46 @@ class AlgSolution:
             # This is intentionally short/off-center. A centerline push just
             # translates the box; pushing the upper end should rotate it.
             if self.est_x >= self.ROTATE_X_STOP:
-                self.phase = "RIGHT_ALIGN"
+                self.phase = "PUSH_PIT"
                 self.step = 0
                 return
             if s >= self.ROTATE_BOX_STEPS:
-                self.phase = "RIGHT_ALIGN"
+                self.phase = "PUSH_PIT"
                 self.step = 0
                 return
 
         elif p == "RIGHT_ALIGN":
-            # Move down after the corner push, then back up for the final +X shove.
-            # LiDAR is noisy here, so use robot pose as the primary guard.
-            if self.est_y <= self.PIT_ALIGN_Y:
-                self.phase = "BACK_SIDE"
-                self.step = 0
-            elif s >= self.RIGHT_ALIGN_STEPS:
-                self.phase = "BACK_SIDE"
-                self.step = 0
+            self.phase = "GO_PLATFORM"
+            self.step = 0
 
         elif p == "BACK_SIDE":
-            # First back up to x < -3.0
-            # Then strafe right to y < -0.8 (south of box)
-            if self.est_x < self.BACK_SIDE_X and self.est_y < self.BACK_SIDE_Y:
-                self.phase = "PUSH_PIT"
-                self.step = 0
-            elif s >= self.BACK_SIDE_STEPS:
-                self.phase = "PUSH_PIT"
-                self.step = 0
+            self.phase = "GO_PLATFORM"
+            self.step = 0
 
         elif p == "PUSH_PIT":
             # Keep pushing until box is in pit OR box is past robot
             if self._is_box_in_pit():
-                self.phase = "STABILIZE"
+                self.phase = "GO_PLATFORM"
                 self.step = 0
                 return
             if self._detected_box_pass():
-                self.phase = "STABILIZE"
+                self.phase = "GO_PLATFORM"
                 self.step = 0
                 return
             if s >= self.PUSH_PIT_STEPS:
-                self.phase = "STABILIZE"
+                self.phase = "GO_PLATFORM"
                 self.step = 0
                 return
+
+        elif p == "GO_PLATFORM":
+            # The box does not cover the whole B2 pit. Move to the upper
+            # platform lane before crossing instead of entering the center gap.
+            if self.est_y >= self.PLATFORM_Y and self.est_x >= self.PLATFORM_X:
+                self.phase = "STABILIZE"
+                self.step = 0
+            elif s >= self.GO_PLATFORM_STEPS:
+                self.phase = "STABILIZE"
+                self.step = 0
 
         elif p == "STABILIZE":
             # Wait for robot yaw to stabilize before crossing
@@ -612,13 +611,18 @@ class AlgSolution:
             # Always do both back AND strafe in this phase
             # Target: x < -3.5, y < -0.8 (south of box)
             vx = -0.65 if self.est_x > self.BACK_SIDE_X else 0.0
-            vy = -0.65 if self.est_y > self.BACK_SIDE_Y else 0.0
-            self._set_world_velocity(vx, vy, -self.est_yaw * 0.5)
+            self._set_world_velocity(vx, 0.0, -self.est_yaw * 0.5)
         elif p == "PUSH_PIT":
-            # Final shove: keep the robot roughly centered on the lower side of
-            # the now-rotated box so contact does not peel off diagonally.
-            y_err = self.PIT_ALIGN_Y - self.est_y
-            self._set_world_velocity(0.65, max(-0.30, min(0.30, 0.8 * y_err)), -self.est_yaw * 0.4)
+            # Push the box only until the reward x-range. Do not aim for the
+            # center gap; the B2 box is smaller than the pit width.
+            y_err = self.PIT_PUSH_Y - self.est_y
+            self._set_world_velocity(0.60, max(-0.35, min(0.35, 0.8 * y_err)), -self.est_yaw * 0.4)
+        elif p == "GO_PLATFORM":
+            y_err = self.PLATFORM_Y - self.est_y
+            x_err = self.PLATFORM_X - self.est_x
+            vx = max(-0.35, min(0.45, 0.6 * x_err))
+            vy = max(-0.25, min(0.75, 0.8 * y_err))
+            self._set_world_velocity(vx, vy, -self.est_yaw * 0.7)
         elif p == "STABILIZE":
             # Stop and correct yaw until stable
             if abs(self.est_yaw) > 0.1:
@@ -626,12 +630,14 @@ class AlgSolution:
             else:
                 self._set_body_velocity(0.0, 0.0, 0.0)
         elif p == "CROSS":
-            # Cross pit with yaw correction
+            # Cross on the upper/platform lane. Holding Y is more important
+            # than forcing the robot through the center of the pit.
             if abs(self.est_yaw) > 0.1:
                 wz = -self.est_yaw * 0.5
             else:
                 wz = 0.0
-            self._set_world_velocity(0.8, 0.0, wz)
+            y_err = self.PLATFORM_Y - self.est_y
+            self._set_world_velocity(0.70, max(-0.35, min(0.35, 0.7 * y_err)), wz)
         elif p == "DONE":
             self._set_body_velocity(0.0, 0.0, 0.0)
 
