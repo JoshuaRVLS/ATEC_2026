@@ -114,6 +114,13 @@ class AlgSolution:
         self._last_phase = None
         self._printed_obs = False
 
+        # ── Manual teleop / replay hook ────────────────────────────────────
+        self.manual_control = False
+        self.manual_world_frame = False
+        self.manual_vx = 0.0
+        self.manual_vy = 0.0
+        self.manual_wz = 0.0
+
     # ══════════════════════════════════════════════════════════════════════════
     # Pose estimation (dead reckoning)
     # ══════════════════════════════════════════════════════════════════════════
@@ -461,6 +468,23 @@ class AlgSolution:
     # Policy interface (mirrors solution_rl.py)
     # ══════════════════════════════════════════════════════════════════════════
 
+    def set_manual_command(
+        self, vx: float, vy: float, wz: float, world_frame: bool = False
+    ) -> None:
+        """Drive the policy with external velocity commands for teleop/replay."""
+        self.manual_control = True
+        self.manual_world_frame = world_frame
+        self.manual_vx = float(vx)
+        self.manual_vy = float(vy)
+        self.manual_wz = float(wz)
+
+    def clear_manual_command(self) -> None:
+        self.manual_control = False
+        self.manual_world_frame = False
+        self.manual_vx = 0.0
+        self.manual_vy = 0.0
+        self.manual_wz = 0.0
+
     def _set_body_velocity(self, vx: float, vy: float, wz: float) -> None:
         self._vel_x = vx
         self._vel_y = vy
@@ -550,12 +574,20 @@ class AlgSolution:
         self.lidar_box = lb
         # ── Box world position estimation ─────────────────────────────────
         self._estimate_box_world_pos()
-        self._transition()
+        if self.manual_control:
+            self.phase = "TELEOP"
+        else:
+            self._transition()
 
         p = self.phase
 
         # ── Velocity command per phase ──────────────────────────────────────
-        if p == "BACK":
+        if p == "TELEOP":
+            if self.manual_world_frame:
+                self._set_world_velocity(self.manual_vx, self.manual_vy, self.manual_wz)
+            else:
+                self._set_body_velocity(self.manual_vx, self.manual_vy, self.manual_wz)
+        elif p == "BACK":
             self._set_body_velocity(-1.0, 0.0, 0.0)
         elif p == "LEFT":
             # Strafe left to the upper box corner before the rotation push.

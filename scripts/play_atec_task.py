@@ -34,6 +34,18 @@ parser.add_argument(
     default=False,
     help="Enable debug prints for per-step reward/time metrics.",
 )
+parser.add_argument(
+    "--teleop-record",
+    type=str,
+    default=None,
+    help="Drive with keyboard and save velocity commands to this JSON file.",
+)
+parser.add_argument(
+    "--teleop-replay",
+    type=str,
+    default=None,
+    help="Replay a JSON velocity command recording.",
+)
 
 # Isaac Sim / Kit args
 AppLauncher.add_app_launcher_args(parser)
@@ -64,9 +76,90 @@ from isaaclab_tasks.utils import parse_env_cfg
 from rl_utils import camera_follow
 
 
+class KeyboardVelocityTeleop:
+    """Small WASD/QE velocity teleop using Isaac Sim keyboard events."""
+
+    def __init__(self, vx_step=0.12, vy_step=0.12, wz_step=0.18, max_v=0.9, max_w=1.2):
+        self.vx_step = vx_step
+        self.vy_step = vy_step
+        self.wz_step = wz_step
+        self.max_v = max_v
+        self.max_w = max_w
+        self.vx = 0.0
+        self.vy = 0.0
+        self.wz = 0.0
+        self.world_frame = False
+        self._pressed = set()
+        self._sub = None
+
+        import carb.input
+        import omni.appwindow
+
+        self._carb_input = carb.input
+        keyboard = omni.appwindow.get_default_app_window().get_keyboard()
+        self._sub = carb.input.acquire_input_interface().subscribe_to_keyboard_events(
+            keyboard, self._on_keyboard_event
+        )
+        print("[TELEOP] W/S=vx, A/D=vy, Q/E=yaw, Space=stop, R=world/body toggle")
+
+    def _on_keyboard_event(self, event):
+        key = getattr(event.input, "name", str(event.input)).split(".")[-1].upper()
+        event_type = event.type
+        if event_type == self._carb_input.KeyboardEventType.KEY_PRESS:
+            self._pressed.add(key)
+            if key == "SPACE":
+                self.vx = self.vy = self.wz = 0.0
+            elif key == "R":
+                self.world_frame = not self.world_frame
+                mode = "world" if self.world_frame else "body"
+                print(f"[TELEOP] frame={mode}")
+        elif event_type == self._carb_input.KeyboardEventType.KEY_RELEASE:
+            self._pressed.discard(key)
+        return True
+
+    @staticmethod
+    def _clamp(value, lo, hi):
+        return max(lo, min(hi, value))
+
+    def update(self):
+        if "W" in self._pressed:
+            self.vx += self.vx_step
+        if "S" in self._pressed:
+            self.vx -= self.vx_step
+        if "A" in self._pressed:
+            self.vy += self.vy_step
+        if "D" in self._pressed:
+            self.vy -= self.vy_step
+        if "Q" in self._pressed:
+            self.wz += self.wz_step
+        if "E" in self._pressed:
+            self.wz -= self.wz_step
+
+        if not ({"W", "S"} & self._pressed):
+            self.vx *= 0.82
+        if not ({"A", "D"} & self._pressed):
+            self.vy *= 0.82
+        if not ({"Q", "E"} & self._pressed):
+            self.wz *= 0.75
+
+        if abs(self.vx) < 0.02:
+            self.vx = 0.0
+        if abs(self.vy) < 0.02:
+            self.vy = 0.0
+        if abs(self.wz) < 0.02:
+            self.wz = 0.0
+
+        self.vx = self._clamp(self.vx, -self.max_v, self.max_v)
+        self.vy = self._clamp(self.vy, -self.max_v, self.max_v)
+        self.wz = self._clamp(self.wz, -self.max_w, self.max_w)
+        return self.vx, self.vy, self.wz, self.world_frame
+
+
 def play() -> tuple[float, float]:
     if args_cli.task is None:
         raise ValueError("Please provide --task, e.g. --task ATEC-TaskA-G1")
+    if args_cli.teleop_record and args_cli.teleop_replay:
+        raise ValueError("Use either --teleop-record or --teleop-replay, not both.")
 
     is_task_e = isinstance(args_cli.task, str) and args_cli.task.startswith("ATEC-TaskE")
     # -------------------------------------------------------------------------
@@ -108,6 +201,17 @@ def play() -> tuple[float, float]:
 
     dt = env.unwrapped.step_dt if hasattr(env.unwrapped, "step_dt") else None
     timestep = 0
+    teleop = None
+    recording = []
+    replay = None
+    if args_cli.teleop_record:
+        teleop = KeyboardVelocityTeleop()
+        solution.clear_manual_command()
+    if args_cli.teleop_replay:
+        with open(args_cli.teleop_replay, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+        replay = payload["commands"] if isinstance(payload, dict) else payload
+        print(f"[TELEOP] replay loaded {len(replay)} commands from {args_cli.teleop_replay}")
 
     # -------------------------------------------------------------------------
     # Play loop
@@ -117,6 +221,32 @@ def play() -> tuple[float, float]:
     while simulation_app.is_running():
         with torch.inference_mode():
             start_time = time.time()
+
+            if teleop is not None:
+                vx, vy, wz, world_frame = teleop.update()
+                solution.set_manual_command(vx, vy, wz, world_frame=world_frame)
+                recording.append({
+                    "vx": vx,
+                    "vy": vy,
+                    "wz": wz,
+                    "world_frame": world_frame,
+                })
+                if timestep % 25 == 0:
+                    frame = "W" if world_frame else "B"
+                    print(f"[TELEOP]{timestep:<4} frame={frame} cmd=({vx:+.2f},{vy:+.2f},{wz:+.2f})")
+            elif replay is not None:
+                if timestep >= len(replay):
+                    print("[TELEOP] replay finished")
+                    break
+                cmd = replay[timestep]
+                solution.set_manual_command(
+                    cmd.get("vx", 0.0),
+                    cmd.get("vy", 0.0),
+                    cmd.get("wz", 0.0),
+                    world_frame=cmd.get("world_frame", False),
+                )
+            else:
+                solution.clear_manual_command()
 
             # ===== Your controller goes here =====
             resp = solution.predicts(obs, total_episode_reward)
@@ -171,6 +301,17 @@ def play() -> tuple[float, float]:
                     time.sleep(sleep_time)
 
     env.close()
+    if args_cli.teleop_record:
+        out_path = Path(args_cli.teleop_record)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "task": args_cli.task,
+            "dt": dt,
+            "commands": recording,
+        }
+        with open(out_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2)
+        print(f"[TELEOP] saved {len(recording)} commands to {out_path}")
 
     return total_episode_reward, total_elapsed_time
 
