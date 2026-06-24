@@ -77,17 +77,13 @@ from rl_utils import camera_follow
 
 
 class KeyboardVelocityTeleop:
-    """Small WASD/QE velocity teleop using Isaac Sim keyboard events."""
+    """Direct WASD/QE velocity teleop using Isaac Sim keyboard events."""
 
-    def __init__(self, vx_step=0.12, vy_step=0.12, wz_step=0.18, max_v=0.9, max_w=1.2):
-        self.vx_step = vx_step
-        self.vy_step = vy_step
-        self.wz_step = wz_step
-        self.max_v = max_v
-        self.max_w = max_w
-        self.vx = 0.0
-        self.vy = 0.0
-        self.wz = 0.0
+    def __init__(self, base_v=0.75, base_w=1.0, boost_v=1.15, boost_w=1.45):
+        self.base_v = base_v
+        self.base_w = base_w
+        self.boost_v = boost_v
+        self.boost_w = boost_w
         self.world_frame = False
         self._pressed = set()
         self._sub = None
@@ -100,59 +96,57 @@ class KeyboardVelocityTeleop:
         self._sub = carb.input.acquire_input_interface().subscribe_to_keyboard_events(
             keyboard, self._on_keyboard_event
         )
-        print("[TELEOP] W/S=vx, A/D=vy, Q/E=yaw, Space=stop, R=world/body toggle")
+        print(
+            "[TELEOP] W/S=vx, A/D=vy, Q/E=yaw, Shift=boost, "
+            "Space=stop, C=clear keys, R=world/body toggle"
+        )
 
     def _on_keyboard_event(self, event):
         key = getattr(event.input, "name", str(event.input)).split(".")[-1].upper()
         event_type = event.type
         if event_type == self._carb_input.KeyboardEventType.KEY_PRESS:
-            self._pressed.add(key)
             if key == "SPACE":
-                self.vx = self.vy = self.wz = 0.0
+                self._pressed.clear()
+            elif key == "C":
+                self._pressed.clear()
+                print("[TELEOP] cleared pressed keys")
             elif key == "R":
                 self.world_frame = not self.world_frame
                 mode = "world" if self.world_frame else "body"
                 print(f"[TELEOP] frame={mode}")
+            else:
+                self._pressed.add(key)
         elif event_type == self._carb_input.KeyboardEventType.KEY_RELEASE:
             self._pressed.discard(key)
         return True
 
     @staticmethod
-    def _clamp(value, lo, hi):
-        return max(lo, min(hi, value))
+    def _has_any(pressed, names):
+        return any(name in pressed for name in names)
 
     def update(self):
+        boost = self._has_any(self._pressed, {"LEFT_SHIFT", "RIGHT_SHIFT", "SHIFT"})
+        v = self.boost_v if boost else self.base_v
+        w = self.boost_w if boost else self.base_w
+
+        vx = 0.0
+        vy = 0.0
+        wz = 0.0
+
         if "W" in self._pressed:
-            self.vx += self.vx_step
+            vx += v
         if "S" in self._pressed:
-            self.vx -= self.vx_step
+            vx -= v
         if "A" in self._pressed:
-            self.vy += self.vy_step
+            vy += v
         if "D" in self._pressed:
-            self.vy -= self.vy_step
+            vy -= v
         if "Q" in self._pressed:
-            self.wz += self.wz_step
+            wz += w
         if "E" in self._pressed:
-            self.wz -= self.wz_step
+            wz -= w
 
-        if not ({"W", "S"} & self._pressed):
-            self.vx *= 0.82
-        if not ({"A", "D"} & self._pressed):
-            self.vy *= 0.82
-        if not ({"Q", "E"} & self._pressed):
-            self.wz *= 0.75
-
-        if abs(self.vx) < 0.02:
-            self.vx = 0.0
-        if abs(self.vy) < 0.02:
-            self.vy = 0.0
-        if abs(self.wz) < 0.02:
-            self.wz = 0.0
-
-        self.vx = self._clamp(self.vx, -self.max_v, self.max_v)
-        self.vy = self._clamp(self.vy, -self.max_v, self.max_v)
-        self.wz = self._clamp(self.wz, -self.max_w, self.max_w)
-        return self.vx, self.vy, self.wz, self.world_frame
+        return vx, vy, wz, self.world_frame
 
 
 def play() -> tuple[float, float]:
@@ -211,6 +205,7 @@ def play() -> tuple[float, float]:
         with open(args_cli.teleop_replay, "r", encoding="utf-8") as f:
             payload = json.load(f)
         replay = payload["commands"] if isinstance(payload, dict) else payload
+        solution.set_replay_commands(replay)
         print(f"[TELEOP] replay loaded {len(replay)} commands from {args_cli.teleop_replay}")
 
     # -------------------------------------------------------------------------
@@ -230,21 +225,16 @@ def play() -> tuple[float, float]:
                     "vy": vy,
                     "wz": wz,
                     "world_frame": world_frame,
+                    "dt": dt,
                 })
                 if timestep % 25 == 0:
                     frame = "W" if world_frame else "B"
                     print(f"[TELEOP]{timestep:<4} frame={frame} cmd=({vx:+.2f},{vy:+.2f},{wz:+.2f})")
             elif replay is not None:
                 if timestep >= len(replay):
-                    print("[TELEOP] replay finished")
-                    break
-                cmd = replay[timestep]
-                solution.set_manual_command(
-                    cmd.get("vx", 0.0),
-                    cmd.get("vy", 0.0),
-                    cmd.get("wz", 0.0),
-                    world_frame=cmd.get("world_frame", False),
-                )
+                    solution.clear_manual_command()
+                else:
+                    solution.clear_manual_command()
             else:
                 solution.clear_manual_command()
 
