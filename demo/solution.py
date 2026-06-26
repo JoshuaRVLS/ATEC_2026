@@ -24,6 +24,19 @@ class AlgSolution:
     DEFAULT_REPLAY_NAME = "task_d_manual_best.json"
     REPLAY_END_STOP_STEPS = 50
     REPLAY_END_SLOW_FORWARD = 0.25
+    PARKOUR_PROP_DIM = 53
+    PARKOUR_SCAN_DIM = 5760
+    PARKOUR_PRIV_EXPLICIT_DIM = 9
+    PARKOUR_PRIV_LATENT_DIM = 29
+    PARKOUR_HISTORY_LEN = 10
+    PARKOUR_TO_ATEC_ACTION_SCALE = 0.5
+    PARKOUR_TOTAL_OBS_DIM = (
+        PARKOUR_PROP_DIM
+        + PARKOUR_SCAN_DIM
+        + PARKOUR_PRIV_EXPLICIT_DIM
+        + PARKOUR_PRIV_LATENT_DIM
+        + PARKOUR_HISTORY_LEN * PARKOUR_PROP_DIM
+    )
 
     def __init__(self):
         base_dir = Path(__file__).resolve().parent
@@ -38,11 +51,12 @@ class AlgSolution:
         self.leg_joint_indices = list(range(12))
         self.arm_joint_indices = list(range(12, 20))
 
-        self.train_to_env_action_scale = torch.tensor(
-            [0.25, 0.5, 0.5, 0.25, 0.5, 0.5, 0.25, 0.5, 0.5, 0.25, 0.5, 0.5],
+        self.train_to_env_action_scale = torch.full(
+            (1, self.leg_action_dim),
+            self.PARKOUR_TO_ATEC_ACTION_SCALE,
             device=self.device,
             dtype=torch.float32,
-        ).view(1, -1)
+        )
         self.env_to_train_action_scale = torch.tensor(
             [4.0, 2.0, 2.0, 4.0, 2.0, 2.0, 4.0, 2.0, 2.0, 4.0, 2.0, 2.0],
             device=self.device,
@@ -60,6 +74,11 @@ class AlgSolution:
         self._vel_x = 0.0
         self._vel_y = 0.0
         self._vel_z = 0.0
+        self._parkour_history = torch.zeros(
+            (1, self.PARKOUR_HISTORY_LEN, self.PARKOUR_PROP_DIM),
+            device=self.device,
+            dtype=torch.float32,
+        )
         self.step = 0
         self.phase = "REPLAY"
         self._printed_obs = False
@@ -214,34 +233,131 @@ class AlgSolution:
             cmd = cmd.repeat(num_envs, 1)
         return cmd.to(dtype=proprio.dtype)
 
-    def _extract_policy_obs(self, obs, action_dim: int) -> torch.Tensor:
+    def _split_proprio(self, obs, action_dim: int):
         proprio = obs["proprio"].to(self.device)
 
         idx = 0
-        _ = proprio[:, idx:idx + 3]; idx += 3
+        base_lin_vel = proprio[:, idx:idx + 3]; idx += 3
         base_ang_vel = proprio[:, idx:idx + 3]; idx += 3
-        _ = proprio[:, idx:idx + 3]; idx += 3
+        _velocity_commands = proprio[:, idx:idx + 3]; idx += 3
         projected_gravity = proprio[:, idx:idx + 3]; idx += 3
         joint_pos_all = proprio[:, idx:idx + action_dim]; idx += action_dim
         joint_vel_all = proprio[:, idx:idx + action_dim]; idx += action_dim
         actions_all = proprio[:, idx:idx + action_dim]
+        return (
+            proprio,
+            base_lin_vel,
+            base_ang_vel,
+            projected_gravity,
+            joint_pos_all,
+            joint_vel_all,
+            actions_all,
+        )
 
+    def _extract_policy_obs(self, obs, action_dim: int) -> torch.Tensor:
+        (
+            proprio,
+            base_lin_vel,
+            base_ang_vel,
+            projected_gravity,
+            joint_pos_all,
+            joint_vel_all,
+            actions_all,
+        ) = self._split_proprio(obs, action_dim)
+
+        num_envs = int(proprio.shape[0])
         joint_pos_leg = joint_pos_all[:, self.leg_joint_indices]
         joint_vel_leg = joint_vel_all[:, self.leg_joint_indices]
         actions_env_leg = actions_all[:, self.leg_joint_indices]
-        actions_train_leg = actions_env_leg * self.env_to_train_action_scale.to(dtype=proprio.dtype)
+        last_action_leg = actions_env_leg / self.train_to_env_action_scale.to(dtype=proprio.dtype)
 
-        return torch.cat(
+        gravity_xy = projected_gravity[:, :2]
+        zeros_1 = torch.zeros((num_envs, 1), device=self.device, dtype=proprio.dtype)
+        zeros_2 = torch.zeros((num_envs, 2), device=self.device, dtype=proprio.dtype)
+        env_non_flat = torch.ones((num_envs, 1), device=self.device, dtype=proprio.dtype)
+        env_flat = torch.zeros((num_envs, 1), device=self.device, dtype=proprio.dtype)
+        contact_fill = torch.zeros((num_envs, 4), device=self.device, dtype=proprio.dtype)
+        cmd = self._get_velocity_commands(proprio)
+
+        prop = torch.cat(
             [
                 base_ang_vel * 0.25,
-                projected_gravity,
-                self._get_velocity_commands(proprio),
+                gravity_xy,
+                zeros_1,
+                zeros_1,
+                zeros_1,
+                zeros_2,
+                cmd[:, 0:1],
+                env_non_flat,
+                env_flat,
                 joint_pos_leg,
                 joint_vel_leg * 0.05,
-                actions_train_leg,
+                last_action_leg,
+                contact_fill,
             ],
             dim=-1,
         )
+        if prop.shape[-1] != self.PARKOUR_PROP_DIM:
+            raise RuntimeError(f"Parkour prop dim mismatch: {prop.shape[-1]}")
+
+        extero = obs.get("extero")
+        if extero is None:
+            scan = torch.zeros(
+                (num_envs, self.PARKOUR_SCAN_DIM), device=self.device, dtype=proprio.dtype
+            )
+        else:
+            scan = extero.to(device=self.device, dtype=proprio.dtype)
+            if scan.ndim == 1:
+                scan = scan.view(1, -1)
+            else:
+                scan = scan.reshape(scan.shape[0], -1)
+            if scan.shape[-1] < self.PARKOUR_SCAN_DIM:
+                pad = torch.zeros(
+                    (scan.shape[0], self.PARKOUR_SCAN_DIM - scan.shape[-1]),
+                    device=self.device,
+                    dtype=proprio.dtype,
+                )
+                scan = torch.cat([scan, pad], dim=-1)
+            elif scan.shape[-1] > self.PARKOUR_SCAN_DIM:
+                scan = scan[:, :self.PARKOUR_SCAN_DIM]
+            scan = torch.nan_to_num(scan, nan=0.0, posinf=10.0, neginf=0.0)
+            scan = torch.clamp(scan, -1.0, 10.0)
+
+        if self._parkour_history.shape[0] != num_envs or self._parkour_history.dtype != proprio.dtype:
+            self._parkour_history = torch.zeros(
+                (num_envs, self.PARKOUR_HISTORY_LEN, self.PARKOUR_PROP_DIM),
+                device=self.device,
+                dtype=proprio.dtype,
+            )
+        if self.step <= 1:
+            history = torch.stack([prop] * self.PARKOUR_HISTORY_LEN, dim=1)
+        else:
+            history = torch.cat([self._parkour_history[:, 1:], prop.unsqueeze(1)], dim=1)
+        self._parkour_history = history.detach()
+
+        priv_explicit = torch.cat(
+            [
+                base_lin_vel * 2.0,
+                torch.zeros((num_envs, 6), device=self.device, dtype=proprio.dtype),
+            ],
+            dim=-1,
+        )
+        priv_latent = torch.zeros(
+            (num_envs, self.PARKOUR_PRIV_LATENT_DIM), device=self.device, dtype=proprio.dtype
+        )
+        policy_obs = torch.cat(
+            [
+                prop,
+                scan,
+                priv_explicit,
+                priv_latent,
+                history.reshape(num_envs, -1),
+            ],
+            dim=-1,
+        )
+        if policy_obs.shape[-1] != self.PARKOUR_TOTAL_OBS_DIM:
+            raise RuntimeError(f"Parkour obs dim mismatch: {policy_obs.shape[-1]}")
+        return policy_obs
 
     def _map_policy_action_to_env_action(self, action_train: torch.Tensor, action_dim: int) -> torch.Tensor:
         if action_train.shape[-1] != self.leg_action_dim:
