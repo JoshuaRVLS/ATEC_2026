@@ -29,12 +29,14 @@ class AlgSolution:
     PARKOUR_PRIV_EXPLICIT_DIM = 9
     PARKOUR_PRIV_LATENT_DIM = 29
     PARKOUR_HISTORY_LEN = 10
-    PARKOUR_TO_ATEC_ACTION_SCALE = 0.5
+    PARKOUR_TO_ATEC_ACTION_SCALE = 0.25
     PARKOUR_IDLE_VX = 0.35
     PARKOUR_MIN_VX = 0.30
     PARKOUR_MAX_VX = 0.80
     PARKOUR_MAX_DELTA_YAW = 1.60
-    PARKOUR_ACTION_CLIP = 4.80
+    PARKOUR_ACTION_CLIP = 2.00
+    PARKOUR_RAMP_STEPS = 50
+    PARKOUR_ACTION_SMOOTHING = 0.70
     PARKOUR_TOTAL_OBS_DIM = (
         PARKOUR_PROP_DIM
         + PARKOUR_SCAN_DIM
@@ -59,8 +61,12 @@ class AlgSolution:
         action_scale = float(os.environ.get("PARKOUR_ACTION_SCALE", self.PARKOUR_TO_ATEC_ACTION_SCALE))
         self.parkour_idle_vx = float(os.environ.get("PARKOUR_IDLE_VX", self.PARKOUR_IDLE_VX))
         self.parkour_action_clip = float(os.environ.get("PARKOUR_ACTION_CLIP", self.PARKOUR_ACTION_CLIP))
+        self.parkour_ramp_steps = int(os.environ.get("PARKOUR_RAMP_STEPS", self.PARKOUR_RAMP_STEPS))
+        self.parkour_action_smoothing = float(
+            os.environ.get("PARKOUR_ACTION_SMOOTHING", self.PARKOUR_ACTION_SMOOTHING)
+        )
         self.parkour_debug = os.environ.get("PARKOUR_DEBUG", "1").lower() not in {"0", "false", "no"}
-        self.parkour_joint_order = os.environ.get("PARKOUR_JOINT_ORDER", "fl_fr_rl_rr").lower()
+        self.parkour_joint_order = os.environ.get("PARKOUR_JOINT_ORDER", "env").lower()
 
         self.train_to_env_action_scale = torch.full(
             (1, self.leg_action_dim),
@@ -95,6 +101,7 @@ class AlgSolution:
             device=self.device,
             dtype=torch.float32,
         )
+        self._last_action_env: torch.Tensor | None = None
         self.step = 0
         self.phase = "REPLAY"
         self._printed_obs = False
@@ -412,6 +419,16 @@ class AlgSolution:
             action_train[:, self.policy_to_env_leg_perm] * self.train_to_env_action_scale
         )
         action_env[:, self.arm_joint_indices] = self.arm_default_action.repeat(num_envs, 1)
+
+        if self.parkour_ramp_steps > 0:
+            ramp = min(1.0, max(0.0, float(self.step) / float(self.parkour_ramp_steps)))
+            action_env[:, self.leg_joint_indices] *= ramp
+
+        if self._last_action_env is None or self._last_action_env.shape != action_env.shape:
+            self._last_action_env = torch.zeros_like(action_env)
+        alpha = max(0.0, min(0.95, self.parkour_action_smoothing))
+        action_env = alpha * self._last_action_env + (1.0 - alpha) * action_env
+        self._last_action_env = action_env.detach()
         return action_env
 
     def _run_policy(self, obs, action_dim: int) -> torch.Tensor:
