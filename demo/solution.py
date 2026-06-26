@@ -30,6 +30,11 @@ class AlgSolution:
     PARKOUR_PRIV_LATENT_DIM = 29
     PARKOUR_HISTORY_LEN = 10
     PARKOUR_TO_ATEC_ACTION_SCALE = 0.5
+    PARKOUR_IDLE_VX = 0.35
+    PARKOUR_MIN_VX = 0.30
+    PARKOUR_MAX_VX = 0.80
+    PARKOUR_MAX_DELTA_YAW = 1.60
+    PARKOUR_ACTION_CLIP = 4.80
     PARKOUR_TOTAL_OBS_DIM = (
         PARKOUR_PROP_DIM
         + PARKOUR_SCAN_DIM
@@ -51,17 +56,28 @@ class AlgSolution:
         self.leg_joint_indices = list(range(12))
         self.arm_joint_indices = list(range(12, 20))
 
+        action_scale = float(os.environ.get("PARKOUR_ACTION_SCALE", self.PARKOUR_TO_ATEC_ACTION_SCALE))
+        self.parkour_idle_vx = float(os.environ.get("PARKOUR_IDLE_VX", self.PARKOUR_IDLE_VX))
+        self.parkour_action_clip = float(os.environ.get("PARKOUR_ACTION_CLIP", self.PARKOUR_ACTION_CLIP))
+        self.parkour_debug = os.environ.get("PARKOUR_DEBUG", "1").lower() not in {"0", "false", "no"}
+        self.parkour_joint_order = os.environ.get("PARKOUR_JOINT_ORDER", "fl_fr_rl_rr").lower()
+
         self.train_to_env_action_scale = torch.full(
             (1, self.leg_action_dim),
-            self.PARKOUR_TO_ATEC_ACTION_SCALE,
+            action_scale,
             device=self.device,
             dtype=torch.float32,
         )
-        self.env_to_train_action_scale = torch.tensor(
-            [4.0, 2.0, 2.0, 4.0, 2.0, 2.0, 4.0, 2.0, 2.0, 4.0, 2.0, 2.0],
-            device=self.device,
-            dtype=torch.float32,
-        ).view(1, -1)
+        if self.parkour_joint_order in {"env", "atec", "fr_fl_rr_rl"}:
+            leg_perm = list(range(self.leg_action_dim))
+        elif self.parkour_joint_order in {"fl_fr_rl_rr", "parkour"}:
+            leg_perm = [3, 4, 5, 0, 1, 2, 9, 10, 11, 6, 7, 8]
+        else:
+            raise ValueError(
+                "PARKOUR_JOINT_ORDER must be one of: env, atec, fr_fl_rr_rl, fl_fr_rl_rr, parkour"
+            )
+        self.env_to_policy_leg_perm = torch.tensor(leg_perm, device=self.device, dtype=torch.long)
+        self.policy_to_env_leg_perm = torch.tensor(leg_perm, device=self.device, dtype=torch.long)
         self.arm_default_action = torch.zeros(
             (1, self.arm_action_dim), device=self.device, dtype=torch.float32
         )
@@ -82,6 +98,7 @@ class AlgSolution:
         self.step = 0
         self.phase = "REPLAY"
         self._printed_obs = False
+        self._printed_policy_debug = False
 
         self.manual_control = False
         self.manual_world_frame = False
@@ -224,8 +241,12 @@ class AlgSolution:
 
     def _get_velocity_commands(self, proprio: torch.Tensor) -> torch.Tensor:
         num_envs = int(proprio.shape[0])
+        vx = self._vel_x
+        if abs(vx) < 1.0e-6 and abs(self._vel_y) < 1.0e-6 and abs(self._vel_z) < 1.0e-6:
+            vx = self.parkour_idle_vx
+        vx = max(self.PARKOUR_MIN_VX, min(self.PARKOUR_MAX_VX, vx))
         cmd = torch.tensor(
-            [self._vel_x, self._vel_y, self._vel_z],
+            [vx, self._vel_y, self._vel_z],
             device=self.device,
             dtype=torch.float32,
         ).view(1, 3)
@@ -266,14 +287,23 @@ class AlgSolution:
         ) = self._split_proprio(obs, action_dim)
 
         num_envs = int(proprio.shape[0])
-        joint_pos_leg = joint_pos_all[:, self.leg_joint_indices]
-        joint_vel_leg = joint_vel_all[:, self.leg_joint_indices]
+        joint_pos_env_leg = joint_pos_all[:, self.leg_joint_indices]
+        joint_vel_env_leg = joint_vel_all[:, self.leg_joint_indices]
         actions_env_leg = actions_all[:, self.leg_joint_indices]
-        last_action_leg = actions_env_leg / self.train_to_env_action_scale.to(dtype=proprio.dtype)
+        joint_pos_leg = joint_pos_env_leg[:, self.env_to_policy_leg_perm]
+        joint_vel_leg = joint_vel_env_leg[:, self.env_to_policy_leg_perm]
+        actions_policy_leg = actions_env_leg[:, self.env_to_policy_leg_perm]
+        scale = self.train_to_env_action_scale.to(dtype=proprio.dtype)
+        last_action_leg = actions_policy_leg / scale
 
         gravity_xy = projected_gravity[:, :2]
         zeros_1 = torch.zeros((num_envs, 1), device=self.device, dtype=proprio.dtype)
         zeros_2 = torch.zeros((num_envs, 2), device=self.device, dtype=proprio.dtype)
+        delta_yaw_cmd = max(
+            -self.PARKOUR_MAX_DELTA_YAW,
+            min(self.PARKOUR_MAX_DELTA_YAW, self._vel_z),
+        )
+        delta_yaw = torch.full((num_envs, 1), delta_yaw_cmd, device=self.device, dtype=proprio.dtype)
         env_non_flat = torch.ones((num_envs, 1), device=self.device, dtype=proprio.dtype)
         env_flat = torch.zeros((num_envs, 1), device=self.device, dtype=proprio.dtype)
         contact_fill = torch.zeros((num_envs, 4), device=self.device, dtype=proprio.dtype)
@@ -284,8 +314,8 @@ class AlgSolution:
                 base_ang_vel * 0.25,
                 gravity_xy,
                 zeros_1,
-                zeros_1,
-                zeros_1,
+                delta_yaw,
+                delta_yaw,
                 zeros_2,
                 cmd[:, 0:1],
                 env_non_flat,
@@ -320,8 +350,8 @@ class AlgSolution:
                 scan = torch.cat([scan, pad], dim=-1)
             elif scan.shape[-1] > self.PARKOUR_SCAN_DIM:
                 scan = scan[:, :self.PARKOUR_SCAN_DIM]
-            scan = torch.nan_to_num(scan, nan=0.0, posinf=10.0, neginf=0.0)
-            scan = torch.clamp(scan, -1.0, 10.0)
+            scan = torch.nan_to_num(scan, nan=0.0, posinf=1.0, neginf=-1.0)
+            scan = torch.clamp(scan, -1.0, 1.0)
 
         if self._parkour_history.shape[0] != num_envs or self._parkour_history.dtype != proprio.dtype:
             self._parkour_history = torch.zeros(
@@ -357,6 +387,18 @@ class AlgSolution:
         )
         if policy_obs.shape[-1] != self.PARKOUR_TOTAL_OBS_DIM:
             raise RuntimeError(f"Parkour obs dim mismatch: {policy_obs.shape[-1]}")
+        if self.parkour_debug and not self._printed_policy_debug:
+            print(
+                "[PARKOUR-OBS] "
+                f"proprio={tuple(proprio.shape)} policy_obs={tuple(policy_obs.shape)} "
+                f"cmd=({cmd[0,0].item():+.2f},{cmd[0,1].item():+.2f},{cmd[0,2].item():+.2f}) "
+                f"joint_pos=[{joint_pos_leg.min().item():+.2f},{joint_pos_leg.max().item():+.2f}] "
+                f"joint_vel=[{joint_vel_leg.min().item():+.2f},{joint_vel_leg.max().item():+.2f}] "
+                f"last_action=[{last_action_leg.min().item():+.2f},{last_action_leg.max().item():+.2f}] "
+                f"scan=[{scan.min().item():+.2f},{scan.max().item():+.2f}] "
+                f"scale={scale[0,0].item():.3f} "
+                f"joint_order={self.parkour_joint_order}"
+            )
         return policy_obs
 
     def _map_policy_action_to_env_action(self, action_train: torch.Tensor, action_dim: int) -> torch.Tensor:
@@ -365,7 +407,10 @@ class AlgSolution:
 
         num_envs = action_train.shape[0]
         action_env = torch.zeros((num_envs, action_dim), device=self.device, dtype=torch.float32)
-        action_env[:, self.leg_joint_indices] = action_train * self.train_to_env_action_scale
+        action_train = torch.clamp(action_train, -self.parkour_action_clip, self.parkour_action_clip)
+        action_env[:, self.leg_joint_indices] = (
+            action_train[:, self.policy_to_env_leg_perm] * self.train_to_env_action_scale
+        )
         action_env[:, self.arm_joint_indices] = self.arm_default_action.repeat(num_envs, 1)
         return action_env
 
@@ -378,6 +423,13 @@ class AlgSolution:
         action_train = action_train.to(device=self.device, dtype=torch.float32)
         if action_train.ndim == 1:
             action_train = action_train.unsqueeze(0)
+        if self.parkour_debug and not self._printed_policy_debug:
+            print(
+                "[PARKOUR-ACT] "
+                f"train=[{action_train.min().item():+.2f},{action_train.max().item():+.2f}] "
+                f"mean={action_train.mean().item():+.2f}"
+            )
+            self._printed_policy_debug = True
         return self._map_policy_action_to_env_action(action_train, action_dim)
 
     def predicts(self, obs, current_score):
