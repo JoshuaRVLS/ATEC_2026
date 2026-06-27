@@ -1,10 +1,9 @@
-"""Task D B2Piper controller: velocity-command replay through the B2 policy.
+"""Task D B2Piper controller: teleop/replay through a locomotion policy.
 
-This file intentionally stays small.  Task D box contact is too inconsistent for
-the previous open-loop state machine, so the deadline path is:
-  1. drive manually with scripts/play_atec_task.py --teleop-record,
-  2. save the best command macro as demo/task_d_manual_best.json,
-  3. replay those velocity commands through the existing locomotion policy.
+The primary policy is demo/policy.pt.  The adapter is intentionally defensive:
+it auto-selects the most plausible 48+5760 observation layout, limits unsafe
+policy outputs, and falls back to demo/policy.pt.official when the parkour policy
+shows early spin/fall-risk behavior.
 """
 
 from __future__ import annotations
@@ -19,52 +18,36 @@ import torch
 
 
 class AlgSolution:
-    """Replay/manual velocity commands while the B2 locomotion policy stabilizes legs."""
-
     DEFAULT_REPLAY_NAME = "task_d_manual_best.json"
     REPLAY_END_STOP_STEPS = 50
     REPLAY_END_SLOW_FORWARD = 0.25
-    # Read from demo/policy.pt TorchScript archive:
-    # num_prop=48, num_scan=5760, num_priv_explicit=0, num_priv_latent=0, num_hist=0.
-    # Keep these tied to the exported model, not the generic parkour source config.
-    PARKOUR_PROP_DIM = 48
-    PARKOUR_SCAN_DIM = 5760
-    PARKOUR_PRIV_EXPLICIT_DIM = 0
-    PARKOUR_PRIV_LATENT_DIM = 0
-    PARKOUR_HISTORY_LEN = 0
-    PARKOUR_TO_ATEC_ACTION_SCALE = 0.5
-    PARKOUR_IDLE_VX = 0.35
-    PARKOUR_MIN_VX = 0.30
-    PARKOUR_MAX_VX = 0.80
-    PARKOUR_ACTION_CLIP = 4.80
-    PARKOUR_RAMP_STEPS = 0
-    PARKOUR_START_FACTOR = 1.00
-    PARKOUR_ACTION_SMOOTHING = 0.00
-    PARKOUR_TOTAL_OBS_DIM = (
-        PARKOUR_PROP_DIM
-        + PARKOUR_SCAN_DIM
-        + PARKOUR_PRIV_EXPLICIT_DIM
-        + PARKOUR_PRIV_LATENT_DIM
-        + PARKOUR_HISTORY_LEN * PARKOUR_PROP_DIM
-    )
+
+    LEG_ACTION_DIM = 12
+    ARM_ACTION_DIM = 8
+    LEG_JOINT_INDICES = list(range(12))
+    ARM_JOINT_INDICES = list(range(12, 20))
+
+    # Policy action -> TaskD raw env action. TaskD then applies scale=0.5.
+    # This reproduces train joint deltas of hip=0.125 and thigh/calf=0.25.
+    TRAIN_TO_ENV_SCALE = [0.25, 0.5, 0.5] * 4
+    ENV_TO_TRAIN_SCALE = [4.0, 2.0, 2.0] * 4
+    RAW_POLICY_CLIP = [1.2, 3.0, 3.0] * 4
+    FINAL_ENV_CLIP = [0.35, 1.25, 1.25] * 4
 
     def __init__(self):
         base_dir = Path(__file__).resolve().parent
-        policy_path = base_dir / "policy.pt"
-
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        self.policy = torch.jit.load(str(policy_path), map_location=self.device)
-        self.policy.eval()
 
-        self.parkour_prop_dim = self._policy_int_attr("num_prop", self.PARKOUR_PROP_DIM)
-        self.parkour_scan_dim = self._policy_int_attr("num_scan", self.PARKOUR_SCAN_DIM)
-        self.parkour_priv_explicit_dim = self._policy_int_attr(
-            "num_priv_explicit", self.PARKOUR_PRIV_EXPLICIT_DIM
-        )
-        self.parkour_priv_latent_dim = self._policy_int_attr(
-            "num_priv_latent", self.PARKOUR_PRIV_LATENT_DIM
-        )
-        self.parkour_history_len = self._policy_int_attr("num_hist", self.PARKOUR_HISTORY_LEN)
+        self.policy = self._load_policy(base_dir / "policy.pt", required=True)
+        self.official_policy = self._load_policy(base_dir / "policy.pt.official", required=False)
+        self.active_policy = "parkour"
+
+        self.parkour_prop_dim = self._policy_int_attr(self.policy, "num_prop", 48)
+        self.parkour_scan_dim = self._policy_int_attr(self.policy, "num_scan", 5760)
+        self.parkour_priv_explicit_dim = self._policy_int_attr(self.policy, "num_priv_explicit", 0)
+        self.parkour_priv_latent_dim = self._policy_int_attr(self.policy, "num_priv_latent", 0)
+        self.parkour_history_len = self._policy_int_attr(self.policy, "num_hist", 0)
+        self.leg_action_dim = self._policy_int_attr(self.policy, "num_actions", self.LEG_ACTION_DIM)
         self.parkour_total_obs_dim = (
             self.parkour_prop_dim
             + self.parkour_scan_dim
@@ -73,70 +56,50 @@ class AlgSolution:
             + self.parkour_history_len * self.parkour_prop_dim
         )
 
-        self.leg_action_dim = self._policy_int_attr("num_actions", 12)
-        self.arm_action_dim = 8
-        self.leg_joint_indices = list(range(12))
-        self.arm_joint_indices = list(range(12, 20))
-
-        action_scale = float(os.environ.get("PARKOUR_ACTION_SCALE", self.PARKOUR_TO_ATEC_ACTION_SCALE))
-        self.parkour_idle_vx = float(os.environ.get("PARKOUR_IDLE_VX", self.PARKOUR_IDLE_VX))
-        self.parkour_min_vx = float(os.environ.get("PARKOUR_MIN_VX", self.PARKOUR_MIN_VX))
-        self.parkour_max_vx = float(os.environ.get("PARKOUR_MAX_VX", self.PARKOUR_MAX_VX))
-        self.parkour_action_clip = float(os.environ.get("PARKOUR_ACTION_CLIP", self.PARKOUR_ACTION_CLIP))
-        self.parkour_ramp_steps = int(os.environ.get("PARKOUR_RAMP_STEPS", self.PARKOUR_RAMP_STEPS))
-        self.parkour_start_factor = float(os.environ.get("PARKOUR_START_FACTOR", self.PARKOUR_START_FACTOR))
-        self.parkour_action_smoothing = float(
-            os.environ.get("PARKOUR_ACTION_SMOOTHING", self.PARKOUR_ACTION_SMOOTHING)
-        )
         self.parkour_debug = os.environ.get("PARKOUR_DEBUG", "1").lower() not in {"0", "false", "no"}
-        self.parkour_joint_order = os.environ.get("PARKOUR_JOINT_ORDER", "env").lower()
-        self.parkour_scan_mode = os.environ.get("PARKOUR_SCAN_MODE", "env").lower()
+        self.parkour_profile = os.environ.get("PARKOUR_PROFILE", "auto").lower()
+        self.parkour_scan_mode = os.environ.get("PARKOUR_SCAN_MODE", "zero").lower()
         self.parkour_scan_flat_value = float(os.environ.get("PARKOUR_SCAN_FLAT_VALUE", "0.0"))
-        self.parkour_joint_pos_mode = os.environ.get("PARKOUR_JOINT_POS_MODE", "env").lower()
-        self.parkour_command_mode = os.environ.get("PARKOUR_COMMAND_MODE", "vx_only").lower()
-        self.parkour_prop_mode = os.environ.get("PARKOUR_PROP_MODE", "atec").lower()
+        self.parkour_action_smoothing = float(os.environ.get("PARKOUR_ACTION_SMOOTHING", "0.80"))
+        self.parkour_ramp_steps = int(os.environ.get("PARKOUR_RAMP_STEPS", "75"))
+        self.parkour_idle_vx = float(os.environ.get("PARKOUR_IDLE_VX", "0.0"))
+        self.parkour_min_vx = float(os.environ.get("PARKOUR_MIN_VX", "-1.0"))
+        self.parkour_max_vx = float(os.environ.get("PARKOUR_MAX_VX", "1.0"))
+        self.yaw_hold_enabled = os.environ.get("PARKOUR_YAW_HOLD", "1").lower() not in {"0", "false", "no"}
 
-        self.train_to_env_action_scale = torch.full(
-            (1, self.leg_action_dim),
-            action_scale,
-            device=self.device,
-            dtype=torch.float32,
-        )
-        if self.parkour_joint_order in {"env", "atec", "fr_fl_rr_rl"}:
+        joint_order = os.environ.get("PARKOUR_JOINT_ORDER", "env").lower()
+        if joint_order in {"env", "atec", "fr_fl_rr_rl"}:
             leg_perm = list(range(self.leg_action_dim))
-        elif self.parkour_joint_order in {"fl_fr_rl_rr", "parkour"}:
+        elif joint_order in {"fl_fr_rl_rr", "parkour"}:
             leg_perm = [3, 4, 5, 0, 1, 2, 9, 10, 11, 6, 7, 8]
         else:
-            raise ValueError(
-                "PARKOUR_JOINT_ORDER must be one of: env, atec, fr_fl_rr_rl, fl_fr_rl_rr, parkour"
-            )
-        if self.parkour_scan_mode not in {"env", "zero", "flat"}:
-            raise ValueError("PARKOUR_SCAN_MODE must be one of: env, zero, flat")
-        if self.parkour_joint_pos_mode not in {"env", "zero"}:
-            raise ValueError("PARKOUR_JOINT_POS_MODE must be one of: env, zero")
-        if self.parkour_command_mode not in {"vx_only", "xyz"}:
-            raise ValueError("PARKOUR_COMMAND_MODE must be one of: vx_only, xyz")
-        if self.parkour_prop_mode not in {"atec", "locomotion_scaled", "parkour48"}:
-            raise ValueError("PARKOUR_PROP_MODE must be one of: atec, locomotion_scaled, parkour48")
+            raise ValueError("PARKOUR_JOINT_ORDER must be env or parkour")
+
         self.env_to_policy_leg_perm = torch.tensor(leg_perm, device=self.device, dtype=torch.long)
         self.policy_to_env_leg_perm = torch.tensor(leg_perm, device=self.device, dtype=torch.long)
-        self.arm_default_action = torch.zeros(
-            (1, self.arm_action_dim), device=self.device, dtype=torch.float32
-        )
+        self.train_to_env_scale = torch.tensor(
+            self.TRAIN_TO_ENV_SCALE, device=self.device, dtype=torch.float32
+        ).view(1, -1)
+        self.env_to_train_scale = torch.tensor(
+            self.ENV_TO_TRAIN_SCALE, device=self.device, dtype=torch.float32
+        ).view(1, -1)
+        self.raw_policy_clip = torch.tensor(
+            self.RAW_POLICY_CLIP, device=self.device, dtype=torch.float32
+        ).view(1, -1)
+        self.final_env_clip = torch.tensor(
+            self.FINAL_ENV_CLIP, device=self.device, dtype=torch.float32
+        ).view(1, -1)
+        self.arm_default_action = torch.zeros((1, self.ARM_ACTION_DIM), device=self.device)
 
         self._dt = 0.02
         self.est_x = -3.0
         self.est_y = 0.0
         self.est_yaw = 0.0
-
         self._vel_x = 0.0
         self._vel_y = 0.0
         self._vel_z = 0.0
-        self._last_action_env: torch.Tensor | None = None
         self.step = 0
         self.phase = "REPLAY"
-        self._printed_obs = False
-        self._printed_policy_debug = False
 
         self.manual_control = False
         self.manual_world_frame = False
@@ -148,36 +111,50 @@ class AlgSolution:
         self.replay_index = 0
         self.replay_end_index: int | None = None
         self._replay_warned = False
-        self._load_default_replay(base_dir / self.DEFAULT_REPLAY_NAME)
 
+        self._selected_profile: str | None = None
+        self._last_safe_action_env: torch.Tensor | None = None
+        self._last_output_action_env: torch.Tensor | None = None
+        self._unsafe_steps = 0
+        self._printed_obs_keys = False
+        self._printed_policy_action = False
+        self._printed_env_action = False
+        self._switched_to_official = False
+
+        self._load_default_replay(base_dir / self.DEFAULT_REPLAY_NAME)
         if self.parkour_debug:
             print(
                 "[PARKOUR-MODEL] "
                 f"prop={self.parkour_prop_dim} scan={self.parkour_scan_dim} "
                 f"priv_explicit={self.parkour_priv_explicit_dim} "
                 f"priv_latent={self.parkour_priv_latent_dim} hist={self.parkour_history_len} "
-                f"total={self.parkour_total_obs_dim} actions={self.leg_action_dim}"
+                f"total={self.parkour_total_obs_dim} actions={self.leg_action_dim} "
+                f"fallback={'yes' if self.official_policy is not None else 'no'}"
             )
 
-    def _policy_int_attr(self, name: str, default: int) -> int:
-        actor = getattr(self.policy, "actor", None)
-        source = actor if actor is not None else self.policy
+    def _load_policy(self, path: Path, required: bool):
+        if not path.exists():
+            if required:
+                raise FileNotFoundError(path)
+            return None
+        policy = torch.jit.load(str(path), map_location=self.device)
+        policy.eval()
+        return policy
+
+    @staticmethod
+    def _policy_int_attr(policy, name: str, default: int) -> int:
+        actor = getattr(policy, "actor", None)
+        source = actor if actor is not None else policy
         try:
-            value = getattr(source, name)
+            return int(getattr(source, name))
         except Exception:
-            return int(default)
-        try:
-            return int(value)
-        except (TypeError, ValueError):
             return int(default)
 
     # ------------------------------------------------------------------
     # Public hooks used by scripts/play_atec_task.py
     # ------------------------------------------------------------------
 
-    def set_manual_command(
-        self, vx: float, vy: float, wz: float, world_frame: bool = False
-    ) -> None:
+    def set_manual_command(self, vx: float, vy: float, wz: float, world_frame: bool = False) -> None:
         self.manual_control = True
         self.manual_world_frame = bool(world_frame)
         self.manual_vx = float(vx)
@@ -256,7 +233,7 @@ class AlgSolution:
         return self.REPLAY_END_SLOW_FORWARD, 0.0, 0.0, False, "REPLAY_END_FORWARD"
 
     # ------------------------------------------------------------------
-    # Pose/velocity command helpers
+    # Pose and command helpers
     # ------------------------------------------------------------------
 
     def _update_pose(self, proprio: torch.Tensor) -> None:
@@ -270,11 +247,7 @@ class AlgSolution:
         self.est_x += (cos_y * vx_body - sin_y * vy_body) * self._dt
         self.est_y += (sin_y * vx_body + cos_y * vy_body) * self._dt
         self.est_yaw += yaw_rate * self._dt
-
-        while self.est_yaw > math.pi:
-            self.est_yaw -= 2.0 * math.pi
-        while self.est_yaw < -math.pi:
-            self.est_yaw += 2.0 * math.pi
+        self.est_yaw = (self.est_yaw + math.pi) % (2.0 * math.pi) - math.pi
 
     def _set_body_velocity(self, vx: float, vy: float, wz: float) -> None:
         self._vel_x = float(vx)
@@ -294,28 +267,31 @@ class AlgSolution:
         else:
             self._set_body_velocity(vx, vy, wz)
 
-    # ------------------------------------------------------------------
-    # Policy interface
-    # ------------------------------------------------------------------
-
     def _get_velocity_commands(self, proprio: torch.Tensor) -> torch.Tensor:
         num_envs = int(proprio.shape[0])
         vx = self._vel_x
-        if abs(vx) < 1.0e-6 and abs(self._vel_y) < 1.0e-6 and abs(self._vel_z) < 1.0e-6:
+        vy = self._vel_y
+        wz = self._vel_z
+
+        if abs(vx) < 1.0e-6 and abs(vy) < 1.0e-6 and abs(wz) < 1.0e-6:
             vx = self.parkour_idle_vx
+
+        if self.yaw_hold_enabled and abs(wz) < 0.05:
+            yaw_rate = float(proprio[0, 5].item())
+            wz = max(-1.0, min(1.0, -1.2 * self.est_yaw - 0.25 * yaw_rate))
+
         vx = max(self.parkour_min_vx, min(self.parkour_max_vx, vx))
-        cmd = torch.tensor(
-            [vx, self._vel_y, self._vel_z],
-            device=self.device,
-            dtype=torch.float32,
-        ).view(1, 3)
+        cmd = torch.tensor([vx, vy, wz], device=self.device, dtype=torch.float32).view(1, 3)
         if num_envs > 1:
             cmd = cmd.repeat(num_envs, 1)
         return cmd.to(dtype=proprio.dtype)
 
+    # ------------------------------------------------------------------
+    # Observation adapter
+    # ------------------------------------------------------------------
+
     def _split_proprio(self, obs, action_dim: int):
         proprio = obs["proprio"].to(self.device)
-
         idx = 0
         base_lin_vel = proprio[:, idx:idx + 3]; idx += 3
         base_ang_vel = proprio[:, idx:idx + 3]; idx += 3
@@ -334,203 +310,273 @@ class AlgSolution:
             actions_all,
         )
 
-    def _extract_policy_obs(self, obs, action_dim: int) -> torch.Tensor:
+    def _leg_terms(self, joint_pos_all, joint_vel_all, actions_all):
+        joint_pos_env = joint_pos_all[:, self.LEG_JOINT_INDICES]
+        joint_vel_env = joint_vel_all[:, self.LEG_JOINT_INDICES]
+        actions_env = actions_all[:, self.LEG_JOINT_INDICES]
+        q = joint_pos_env[:, self.env_to_policy_leg_perm]
+        qd = joint_vel_env[:, self.env_to_policy_leg_perm]
+        last_env = actions_env[:, self.env_to_policy_leg_perm]
+        last_train = last_env * self.env_to_train_scale.to(dtype=actions_all.dtype)
+        return q, qd, last_env, last_train
+
+    def _scan_tensor(self, obs, num_envs: int, dtype: torch.dtype) -> torch.Tensor:
+        if self.parkour_scan_mode == "zero":
+            return torch.zeros((num_envs, self.parkour_scan_dim), device=self.device, dtype=dtype)
+        if self.parkour_scan_mode == "flat":
+            return torch.full(
+                (num_envs, self.parkour_scan_dim),
+                self.parkour_scan_flat_value,
+                device=self.device,
+                dtype=dtype,
+            )
+
+        extero = obs.get("extero")
+        if extero is None:
+            return torch.zeros((num_envs, self.parkour_scan_dim), device=self.device, dtype=dtype)
+        scan = extero.to(device=self.device, dtype=dtype)
+        if scan.ndim == 1:
+            scan = scan.view(1, -1)
+        else:
+            scan = scan.reshape(scan.shape[0], -1)
+        if scan.shape[-1] < self.parkour_scan_dim:
+            pad = torch.zeros(
+                (scan.shape[0], self.parkour_scan_dim - scan.shape[-1]),
+                device=self.device,
+                dtype=dtype,
+            )
+            scan = torch.cat([scan, pad], dim=-1)
+        elif scan.shape[-1] > self.parkour_scan_dim:
+            scan = scan[:, :self.parkour_scan_dim]
+        scan = torch.nan_to_num(scan, nan=0.0, posinf=1.0, neginf=-1.0)
+        return torch.clamp(scan, -1.0, 1.0)
+
+    def _candidate_props(self, obs, action_dim: int) -> dict[str, torch.Tensor]:
         (
             proprio,
-            base_lin_vel,
-            base_ang_vel,
-            projected_gravity,
+            base_lin,
+            base_ang,
+            gravity,
             joint_pos_all,
             joint_vel_all,
             actions_all,
         ) = self._split_proprio(obs, action_dim)
-
-        num_envs = int(proprio.shape[0])
-        joint_pos_env_leg = joint_pos_all[:, self.leg_joint_indices]
-        joint_vel_env_leg = joint_vel_all[:, self.leg_joint_indices]
-        actions_env_leg = actions_all[:, self.leg_joint_indices]
-        joint_pos_leg = joint_pos_env_leg[:, self.env_to_policy_leg_perm]
-        joint_vel_leg = joint_vel_env_leg[:, self.env_to_policy_leg_perm]
-        actions_policy_leg = actions_env_leg[:, self.env_to_policy_leg_perm]
-        if self.parkour_joint_pos_mode == "zero":
-            joint_pos_leg = torch.zeros_like(joint_pos_leg)
-        scale = self.train_to_env_action_scale.to(dtype=proprio.dtype)
-        last_action_leg = actions_policy_leg / scale
-
+        q, qd, last_env, last_train = self._leg_terms(joint_pos_all, joint_vel_all, actions_all)
         cmd = self._get_velocity_commands(proprio)
-        if self.parkour_prop_mode == "atec":
-            prop = torch.cat(
-                [
-                    base_lin_vel,
-                    base_ang_vel,
-                    cmd,
-                    projected_gravity,
-                    joint_pos_leg,
-                    joint_vel_leg,
-                    actions_policy_leg,
-                ],
+
+        return {
+            "taskd_raw": torch.cat([base_lin, base_ang, cmd, gravity, q, qd, last_env], dim=-1),
+            "taskd_train_action": torch.cat([base_lin, base_ang, cmd, gravity, q, qd, last_train], dim=-1),
+            "rough_locomotion": torch.cat([base_lin, base_ang, gravity, cmd, q, qd, last_train], dim=-1),
+            "scaled_locomotion": torch.cat(
+                [base_lin * 2.0, base_ang * 0.25, gravity, cmd, q, qd * 0.05, last_train],
                 dim=-1,
-            )
-        elif self.parkour_prop_mode == "locomotion_scaled":
-            prop = torch.cat(
-                [
-                    base_lin_vel * 2.0,
-                    base_ang_vel * 0.25,
-                    cmd,
-                    projected_gravity,
-                    joint_pos_leg,
-                    joint_vel_leg * 0.05,
-                    last_action_leg,
-                ],
-                dim=-1,
-            )
-        else:
-            imu_roll_pitch = projected_gravity[:, :2]
-            zeros_1 = torch.zeros((num_envs, 1), device=self.device, dtype=proprio.dtype)
-            zero_cmd_xy = torch.zeros((num_envs, 2), device=self.device, dtype=proprio.dtype)
-            env_non_flat = torch.ones((num_envs, 1), device=self.device, dtype=proprio.dtype)
-            if self.parkour_command_mode == "xyz":
-                cmd_xy = cmd[:, 1:3]
-                cmd_vx = cmd[:, 0:1]
-            else:
-                cmd_xy = zero_cmd_xy
-                cmd_vx = cmd[:, 0:1]
-            prop = torch.cat(
-                [
-                    base_ang_vel * 0.25,
-                    imu_roll_pitch,
-                    zeros_1,
-                    zeros_1,
-                    zeros_1,
-                    cmd_xy,
-                    cmd_vx,
-                    env_non_flat,
-                    joint_pos_leg,
-                    joint_vel_leg * 0.05,
-                    last_action_leg,
-                ],
-                dim=-1,
-            )
+            ),
+        }
+
+    def _policy_obs_from_prop(self, obs, prop: torch.Tensor) -> torch.Tensor:
         if prop.shape[-1] != self.parkour_prop_dim:
-            raise RuntimeError(f"Parkour prop dim mismatch: {prop.shape[-1]}")
-
-        extero = obs.get("extero")
-        if self.parkour_scan_mode == "zero":
-            scan = torch.zeros(
-                (num_envs, self.parkour_scan_dim), device=self.device, dtype=proprio.dtype
-            )
-        elif self.parkour_scan_mode == "flat":
-            scan = torch.full(
-                (num_envs, self.parkour_scan_dim),
-                self.parkour_scan_flat_value,
-                device=self.device,
-                dtype=proprio.dtype,
-            )
-        elif extero is None:
-            scan = torch.zeros(
-                (num_envs, self.parkour_scan_dim), device=self.device, dtype=proprio.dtype
-            )
-        else:
-            scan = extero.to(device=self.device, dtype=proprio.dtype)
-            if scan.ndim == 1:
-                scan = scan.view(1, -1)
-            else:
-                scan = scan.reshape(scan.shape[0], -1)
-            if scan.shape[-1] < self.parkour_scan_dim:
-                pad = torch.zeros(
-                    (scan.shape[0], self.parkour_scan_dim - scan.shape[-1]),
-                    device=self.device,
-                    dtype=proprio.dtype,
-                )
-                scan = torch.cat([scan, pad], dim=-1)
-            elif scan.shape[-1] > self.parkour_scan_dim:
-                scan = scan[:, :self.parkour_scan_dim]
-            scan = torch.nan_to_num(scan, nan=0.0, posinf=1.0, neginf=-1.0)
-            scan = torch.clamp(scan, -1.0, 1.0)
-
-        if self.parkour_priv_explicit_dim != 0 or self.parkour_priv_latent_dim != 0 or self.parkour_history_len != 0:
-            raise RuntimeError(
-                "This adapter currently supports exported parkour policies with "
-                "num_priv_explicit=0, num_priv_latent=0, and num_hist=0."
-            )
-
-        policy_obs = torch.cat(
-            [
-                prop,
-                scan,
-            ],
-            dim=-1,
-        )
+            raise RuntimeError(f"Parkour prop dim mismatch: {prop.shape[-1]} != {self.parkour_prop_dim}")
+        if self.parkour_priv_explicit_dim or self.parkour_priv_latent_dim or self.parkour_history_len:
+            raise RuntimeError("Unsupported parkour export: priv/history dims are non-zero.")
+        scan = self._scan_tensor(obs, int(prop.shape[0]), prop.dtype)
+        policy_obs = torch.cat([prop, scan], dim=-1)
         if policy_obs.shape[-1] != self.parkour_total_obs_dim:
-            raise RuntimeError(f"Parkour obs dim mismatch: {policy_obs.shape[-1]}")
-        if self.parkour_debug and not self._printed_policy_debug:
-            print(
-                "[PARKOUR-OBS] "
-                f"proprio={tuple(proprio.shape)} policy_obs={tuple(policy_obs.shape)} "
-                f"cmd=({cmd[0,0].item():+.2f},{cmd[0,1].item():+.2f},{cmd[0,2].item():+.2f}) "
-                f"prop=[{prop.min().item():+.2f},{prop.max().item():+.2f}] "
-                f"joint_pos=[{joint_pos_leg.min().item():+.2f},{joint_pos_leg.max().item():+.2f}] "
-                f"joint_vel=[{joint_vel_leg.min().item():+.2f},{joint_vel_leg.max().item():+.2f}] "
-                f"last_action=[{last_action_leg.min().item():+.2f},{last_action_leg.max().item():+.2f}] "
-                f"scan=[{scan.min().item():+.2f},{scan.max().item():+.2f}] "
-                f"scale={scale[0,0].item():.3f} "
-                f"joint_order={self.parkour_joint_order} "
-                f"scan_mode={self.parkour_scan_mode} "
-                f"joint_pos_mode={self.parkour_joint_pos_mode} "
-                f"command_mode={self.parkour_command_mode} "
-                f"prop_mode={self.parkour_prop_mode}"
+            raise RuntimeError(
+                f"Parkour obs dim mismatch: {policy_obs.shape[-1]} != {self.parkour_total_obs_dim}"
             )
         return policy_obs
 
-    def _map_policy_action_to_env_action(self, action_train: torch.Tensor, action_dim: int) -> torch.Tensor:
-        if action_train.shape[-1] != self.leg_action_dim:
-            raise ValueError(f"Expected {self.leg_action_dim}, got {action_train.shape[-1]}")
+    def _score_action(self, action: torch.Tensor) -> float:
+        if not torch.isfinite(action).all():
+            return float("inf")
+        abs_action = action.abs()
+        max_abs = float(abs_action.max().item())
+        if max_abs > 12.0:
+            return float("inf")
+        hip_mean = float(abs_action[:, 0::3].mean().item())
+        saturation_count = float((abs_action > self.raw_policy_clip.to(action.dtype)).sum().item())
+        return float(abs_action.mean().item()) + 0.5 * max_abs + 2.0 * hip_mean + 5.0 * saturation_count
 
-        num_envs = action_train.shape[0]
-        action_env = torch.zeros((num_envs, action_dim), device=self.device, dtype=torch.float32)
-        action_train = torch.clamp(action_train, -self.parkour_action_clip, self.parkour_action_clip)
-        action_env[:, self.leg_joint_indices] = (
-            action_train[:, self.policy_to_env_leg_perm] * self.train_to_env_action_scale
-        )
-        action_env[:, self.arm_joint_indices] = self.arm_default_action.repeat(num_envs, 1)
+    def _select_parkour_profile(self, obs, action_dim: int) -> str:
+        candidates = self._candidate_props(obs, action_dim)
+        valid_names = set(candidates)
+        if self.parkour_profile != "auto":
+            if self.parkour_profile not in valid_names:
+                raise ValueError(f"PARKOUR_PROFILE must be auto or one of {sorted(valid_names)}")
+            self._selected_profile = self.parkour_profile
+            return self._selected_profile
+
+        scores: dict[str, float] = {}
+        with torch.inference_mode():
+            for name, prop in candidates.items():
+                policy_obs = self._policy_obs_from_prop(obs, prop)
+                action = self.policy(policy_obs)
+                if not isinstance(action, torch.Tensor):
+                    action = torch.as_tensor(action, device=self.device, dtype=torch.float32)
+                if action.ndim == 1:
+                    action = action.unsqueeze(0)
+                scores[name] = self._score_action(action.to(device=self.device, dtype=torch.float32))
+
+        self._selected_profile = min(scores, key=scores.get)
+        if self.parkour_debug:
+            formatted = ", ".join(f"{k}:{v:.2f}" if math.isfinite(v) else f"{k}:inf" for k, v in scores.items())
+            print(f"[PARKOUR-PROFILE] selected={self._selected_profile} scores={formatted}")
+        return self._selected_profile
+
+    def _extract_parkour_obs(self, obs, action_dim: int) -> torch.Tensor:
+        profile = self._selected_profile or self._select_parkour_profile(obs, action_dim)
+        props = self._candidate_props(obs, action_dim)
+        prop = props[profile]
+        return self._policy_obs_from_prop(obs, prop)
+
+    def _extract_official_obs(self, obs, action_dim: int) -> torch.Tensor:
+        (
+            proprio,
+            _base_lin,
+            base_ang,
+            gravity,
+            joint_pos_all,
+            joint_vel_all,
+            actions_all,
+        ) = self._split_proprio(obs, action_dim)
+        q, qd, _last_env, last_train = self._leg_terms(joint_pos_all, joint_vel_all, actions_all)
+        cmd = self._get_velocity_commands(proprio)
+        return torch.cat([base_ang * 0.25, gravity, cmd, q, qd * 0.05, last_train], dim=-1)
+
+    # ------------------------------------------------------------------
+    # Policy and action mapping
+    # ------------------------------------------------------------------
+
+    def _policy_forward(self, policy, policy_obs: torch.Tensor) -> torch.Tensor:
+        with torch.inference_mode():
+            action = policy(policy_obs)
+        if not isinstance(action, torch.Tensor):
+            action = torch.as_tensor(action, device=self.device, dtype=torch.float32)
+        action = action.to(device=self.device, dtype=torch.float32)
+        if action.ndim == 1:
+            action = action.unsqueeze(0)
+        return action
+
+    def _switch_to_official(self, reason: str) -> None:
+        if self.active_policy == "official":
+            return
+        if self.official_policy is None:
+            if self.parkour_debug and not self._switched_to_official:
+                print(f"[POLICY-WARN] parkour unsafe ({reason}); official fallback missing")
+                self._switched_to_official = True
+            return
+        self.active_policy = "official"
+        self._last_output_action_env = None
+        self._last_safe_action_env = None
+        self._printed_policy_action = False
+        self._printed_env_action = False
+        print(f"[POLICY-FALLBACK] parkour unsafe; switched to official ({reason})")
+
+    def _raw_action_is_unsafe(self, action_train: torch.Tensor) -> bool:
+        if not torch.isfinite(action_train).all():
+            return True
+        return bool(action_train.abs().max().item() > 12.0)
+
+    def _map_action_to_env(self, action_train: torch.Tensor, action_dim: int) -> torch.Tensor:
+        if action_train.shape[-1] != self.LEG_ACTION_DIM:
+            raise ValueError(f"Expected {self.LEG_ACTION_DIM}, got {action_train.shape[-1]}")
+
+        unsafe = self._raw_action_is_unsafe(action_train)
+        if unsafe:
+            self._unsafe_steps += 1
+            if self._last_safe_action_env is not None:
+                return self._last_safe_action_env.clone()
+        else:
+            self._unsafe_steps = 0
+
+        raw_clip = self.raw_policy_clip.to(dtype=action_train.dtype)
+        final_clip = self.final_env_clip.to(dtype=action_train.dtype)
+        scale = self.train_to_env_scale.to(dtype=action_train.dtype)
+
+        clipped_train = torch.clamp(action_train, -raw_clip, raw_clip)
+        leg_action_env = clipped_train[:, self.policy_to_env_leg_perm] * scale
+        leg_action_env = torch.clamp(leg_action_env, -final_clip, final_clip)
 
         if self.parkour_ramp_steps > 0:
-            start = max(0.0, min(1.0, self.parkour_start_factor))
-            progress = min(1.0, max(0.0, float(self.step) / float(self.parkour_ramp_steps)))
-            ramp = start + (1.0 - start) * progress
-            action_env[:, self.leg_joint_indices] *= ramp
+            ramp = min(1.0, max(0.0, float(self.step) / float(self.parkour_ramp_steps)))
+            leg_action_env = leg_action_env * ramp
 
-        if self._last_action_env is None or self._last_action_env.shape != action_env.shape:
-            self._last_action_env = action_env.detach()
+        action_env = torch.zeros((action_train.shape[0], action_dim), device=self.device, dtype=torch.float32)
+        action_env[:, self.LEG_JOINT_INDICES] = leg_action_env
+        action_env[:, self.ARM_JOINT_INDICES] = self.arm_default_action.repeat(action_train.shape[0], 1)
+
         alpha = max(0.0, min(0.95, self.parkour_action_smoothing))
-        action_env = alpha * self._last_action_env + (1.0 - alpha) * action_env
-        self._last_action_env = action_env.detach()
-        return action_env
+        if self._last_output_action_env is None or self._last_output_action_env.shape != action_env.shape:
+            smoothed = action_env
+        else:
+            smoothed = alpha * self._last_output_action_env + (1.0 - alpha) * action_env
+        self._last_output_action_env = smoothed.detach()
+        if not unsafe:
+            self._last_safe_action_env = smoothed.detach()
+        return smoothed
+
+    def _maybe_switch_for_spin(self, proprio: torch.Tensor) -> None:
+        if self.active_policy != "parkour" or self.step < 10:
+            return
+        yaw_rate = abs(float(proprio[0, 5].item()))
+        if abs(self.est_yaw) > 1.0 or yaw_rate > 4.0 or self._unsafe_steps >= 30:
+            self._switch_to_official("spin_or_invalid_action")
 
     def _run_policy(self, obs, action_dim: int) -> torch.Tensor:
-        policy_obs = self._extract_policy_obs(obs, action_dim)
-        with torch.inference_mode():
-            action_train = self.policy(policy_obs)
-        if not isinstance(action_train, torch.Tensor):
-            action_train = torch.as_tensor(action_train, device=self.device, dtype=torch.float32)
-        action_train = action_train.to(device=self.device, dtype=torch.float32)
-        if action_train.ndim == 1:
-            action_train = action_train.unsqueeze(0)
-        if self.parkour_debug and not self._printed_policy_debug:
-            action_values = [round(float(v), 2) for v in action_train[0].detach().cpu().tolist()]
+        proprio = obs["proprio"].to(self.device)
+        self._maybe_switch_for_spin(proprio)
+
+        if self.active_policy == "official" and self.official_policy is not None:
+            policy_obs = self._extract_official_obs(obs, action_dim)
+            action_train = self._policy_forward(self.official_policy, policy_obs)
+        else:
+            policy_obs = self._extract_parkour_obs(obs, action_dim)
+            action_train = self._policy_forward(self.policy, policy_obs)
+
+        if self._raw_action_is_unsafe(action_train):
+            self._unsafe_steps += 1
+            if self._unsafe_steps >= 30:
+                self._switch_to_official("invalid_or_extreme_action")
+        else:
+            self._unsafe_steps = 0
+
+        action_env = self._map_action_to_env(action_train, action_dim)
+
+        if self.parkour_debug and not self._printed_policy_action:
+            values = [round(float(v), 2) for v in action_train[0].detach().cpu().tolist()]
             print(
-                "[PARKOUR-ACT] "
-                f"train=[{action_train.min().item():+.2f},{action_train.max().item():+.2f}] "
-                f"mean={action_train.mean().item():+.2f} "
-                f"values={action_values}"
+                f"[POLICY-ACT] mode={self.active_policy} profile={self._selected_profile or 'official'} "
+                f"obs={tuple(policy_obs.shape)} train=[{action_train.min().item():+.2f},{action_train.max().item():+.2f}] "
+                f"mean={action_train.mean().item():+.2f} values={values}"
             )
-            self._printed_policy_debug = True
-        return self._map_policy_action_to_env_action(action_train, action_dim)
+            self._printed_policy_action = True
+
+        if self.parkour_debug and not self._printed_env_action:
+            leg_env = action_env[:, self.LEG_JOINT_INDICES]
+            hip = leg_env[:, 0::3]
+            thigh = leg_env[:, 1::3]
+            calf = leg_env[:, 2::3]
+            print(
+                "[POLICY-ENV] "
+                f"final=[{leg_env.min().item():+.2f},{leg_env.max().item():+.2f}] "
+                f"hip=[{hip.min().item():+.2f},{hip.max().item():+.2f}] "
+                f"thigh=[{thigh.min().item():+.2f},{thigh.max().item():+.2f}] "
+                f"calf=[{calf.min().item():+.2f},{calf.max().item():+.2f}] "
+                f"ramp_steps={self.parkour_ramp_steps} smoothing={self.parkour_action_smoothing:.2f}"
+            )
+            self._printed_env_action = True
+
+        return action_env
+
+    # ------------------------------------------------------------------
+    # Main entry point
+    # ------------------------------------------------------------------
 
     def predicts(self, obs, current_score):
-        if not self._printed_obs:
+        if not self._printed_obs_keys:
             print("OBS KEYS:", list(obs.keys()))
-            self._printed_obs = True
+            self._printed_obs_keys = True
 
         proprio = obs["proprio"].to(self.device)
         action_dim = (int(proprio.shape[-1]) - 12) // 3
@@ -549,7 +595,8 @@ class AlgSolution:
         if self.step % 25 == 0:
             frame = "W" if world_frame else "B"
             print(
-                f"[D]{self.phase:<18}|{self.step:<4}|cmd{frame}=({vx:+.2f},{vy:+.2f},{wz:+.2f})|"
+                f"[D]{self.phase:<18}|{self.step:<4}|policy={self.active_policy:<8}|"
+                f"cmd{frame}=({vx:+.2f},{vy:+.2f},{wz:+.2f})|"
                 f"robot=({self.est_x:+.1f},{self.est_y:+.1f},{math.degrees(self.est_yaw):+.0f}deg)"
             )
 
