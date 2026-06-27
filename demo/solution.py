@@ -1,9 +1,9 @@
 """Task D B2Piper controller: teleop/replay through a locomotion policy.
 
-The primary policy is demo/policy.pt.  The adapter is intentionally defensive:
-it auto-selects the most plausible 48+5760 observation layout, limits unsafe
-policy outputs, and falls back to demo/policy.pt.official when the parkour policy
-shows early spin/fall-risk behavior.
+The stable locomotion controller is demo/policy.pt.official when available.
+demo/policy.pt is treated as an experimental parkour policy: it is scored and
+logged, but it is not allowed to drive the robot unless its first action looks
+numerically healthy and PARKOUR_BLEND is explicitly raised above zero.
 """
 
 from __future__ import annotations
@@ -33,6 +33,9 @@ class AlgSolution:
     ENV_TO_TRAIN_SCALE = [4.0, 2.0, 2.0] * 4
     RAW_POLICY_CLIP = [1.2, 3.0, 3.0] * 4
     FINAL_ENV_CLIP = [0.35, 1.25, 1.25] * 4
+    OFFICIAL_FINAL_ENV_CLIP = [0.5, 1.8, 1.8] * 4
+    PARKOUR_RAW_ACTION_LIMIT = 4.0
+    PARKOUR_PROFILE_SCORE_LIMIT = 12.0
 
     def __init__(self):
         base_dir = Path(__file__).resolve().parent
@@ -40,7 +43,7 @@ class AlgSolution:
 
         self.policy = self._load_policy(base_dir / "policy.pt", required=True)
         self.official_policy = self._load_policy(base_dir / "policy.pt.official", required=False)
-        self.active_policy = "parkour"
+        self.active_policy = "official" if self.official_policy is not None else "parkour"
 
         self.parkour_prop_dim = self._policy_int_attr(self.policy, "num_prop", 48)
         self.parkour_scan_dim = self._policy_int_attr(self.policy, "num_scan", 5760)
@@ -60,6 +63,7 @@ class AlgSolution:
         self.parkour_profile = os.environ.get("PARKOUR_PROFILE", "auto").lower()
         self.parkour_scan_mode = os.environ.get("PARKOUR_SCAN_MODE", "zero").lower()
         self.parkour_scan_flat_value = float(os.environ.get("PARKOUR_SCAN_FLAT_VALUE", "0.0"))
+        self.parkour_blend = max(0.0, min(1.0, float(os.environ.get("PARKOUR_BLEND", "0.0"))))
         self.parkour_action_smoothing = float(os.environ.get("PARKOUR_ACTION_SMOOTHING", "0.80"))
         self.parkour_ramp_steps = int(os.environ.get("PARKOUR_RAMP_STEPS", "75"))
         self.parkour_idle_vx = float(os.environ.get("PARKOUR_IDLE_VX", "0.0"))
@@ -89,6 +93,9 @@ class AlgSolution:
         self.final_env_clip = torch.tensor(
             self.FINAL_ENV_CLIP, device=self.device, dtype=torch.float32
         ).view(1, -1)
+        self.official_final_env_clip = torch.tensor(
+            self.OFFICIAL_FINAL_ENV_CLIP, device=self.device, dtype=torch.float32
+        ).view(1, -1)
         self.arm_default_action = torch.zeros((1, self.ARM_ACTION_DIM), device=self.device)
 
         self._dt = 0.02
@@ -113,6 +120,8 @@ class AlgSolution:
         self._replay_warned = False
 
         self._selected_profile: str | None = None
+        self._parkour_enabled = self.official_policy is None
+        self._parkour_disable_reason: str | None = None
         self._last_safe_action_env: torch.Tensor | None = None
         self._last_output_action_env: torch.Tensor | None = None
         self._unsafe_steps = 0
@@ -130,6 +139,12 @@ class AlgSolution:
                 f"priv_latent={self.parkour_priv_latent_dim} hist={self.parkour_history_len} "
                 f"total={self.parkour_total_obs_dim} actions={self.leg_action_dim} "
                 f"fallback={'yes' if self.official_policy is not None else 'no'}"
+            )
+            print(
+                "[POLICY-MODE] "
+                f"primary={self.active_policy} parkour_blend={self.parkour_blend:.2f} "
+                f"parkour_gate_score<{self.PARKOUR_PROFILE_SCORE_LIMIT:.1f} "
+                f"parkour_gate_raw<{self.PARKOUR_RAW_ACTION_LIMIT:.1f}"
             )
 
     def _load_policy(self, path: Path, required: bool):
@@ -392,19 +407,25 @@ class AlgSolution:
             return float("inf")
         abs_action = action.abs()
         max_abs = float(abs_action.max().item())
-        if max_abs > 12.0:
+        if max_abs > self.PARKOUR_RAW_ACTION_LIMIT:
             return float("inf")
         hip_mean = float(abs_action[:, 0::3].mean().item())
         saturation_count = float((abs_action > self.raw_policy_clip.to(action.dtype)).sum().item())
+        if saturation_count > 0:
+            return float("inf")
         return float(abs_action.mean().item()) + 0.5 * max_abs + 2.0 * hip_mean + 5.0 * saturation_count
 
     def _select_parkour_profile(self, obs, action_dim: int) -> str:
+        if self._parkour_disable_reason is not None:
+            raise RuntimeError(f"Parkour policy disabled: {self._parkour_disable_reason}")
+
         candidates = self._candidate_props(obs, action_dim)
         valid_names = set(candidates)
         if self.parkour_profile != "auto":
             if self.parkour_profile not in valid_names:
                 raise ValueError(f"PARKOUR_PROFILE must be auto or one of {sorted(valid_names)}")
             self._selected_profile = self.parkour_profile
+            self._parkour_enabled = True
             return self._selected_profile
 
         scores: dict[str, float] = {}
@@ -419,9 +440,22 @@ class AlgSolution:
                 scores[name] = self._score_action(action.to(device=self.device, dtype=torch.float32))
 
         self._selected_profile = min(scores, key=scores.get)
+        best_score = scores[self._selected_profile]
         if self.parkour_debug:
             formatted = ", ".join(f"{k}:{v:.2f}" if math.isfinite(v) else f"{k}:inf" for k, v in scores.items())
             print(f"[PARKOUR-PROFILE] selected={self._selected_profile} scores={formatted}")
+        if best_score >= self.PARKOUR_PROFILE_SCORE_LIMIT or not math.isfinite(best_score):
+            self._parkour_enabled = False
+            self._parkour_disable_reason = "profile_score"
+            if self.parkour_debug:
+                formatted = ", ".join(f"{k}:{v:.2f}" if math.isfinite(v) else f"{k}:inf" for k, v in scores.items())
+                print(
+                    "[PARKOUR-DISABLED] "
+                    f"reason=profile_score best={self._selected_profile}:{best_score:.2f} "
+                    f"scores={formatted}"
+                )
+            raise RuntimeError("Parkour policy disabled by profile score gate")
+        self._parkour_enabled = True
         return self._selected_profile
 
     def _extract_parkour_obs(self, obs, action_dim: int) -> torch.Tensor:
@@ -476,9 +510,23 @@ class AlgSolution:
     def _raw_action_is_unsafe(self, action_train: torch.Tensor) -> bool:
         if not torch.isfinite(action_train).all():
             return True
-        return bool(action_train.abs().max().item() > 12.0)
+        return bool(action_train.abs().max().item() > self.PARKOUR_RAW_ACTION_LIMIT)
 
-    def _map_action_to_env(self, action_train: torch.Tensor, action_dim: int) -> torch.Tensor:
+    def _map_official_action_to_env(self, action_train: torch.Tensor, action_dim: int) -> torch.Tensor:
+        if action_train.shape[-1] != self.LEG_ACTION_DIM:
+            raise ValueError(f"Expected {self.LEG_ACTION_DIM}, got {action_train.shape[-1]}")
+
+        scale = self.train_to_env_scale.to(dtype=action_train.dtype)
+        final_clip = self.official_final_env_clip.to(dtype=action_train.dtype)
+        leg_action_env = action_train[:, self.policy_to_env_leg_perm] * scale
+        leg_action_env = torch.clamp(leg_action_env, -final_clip, final_clip)
+
+        action_env = torch.zeros((action_train.shape[0], action_dim), device=self.device, dtype=torch.float32)
+        action_env[:, self.LEG_JOINT_INDICES] = leg_action_env
+        action_env[:, self.ARM_JOINT_INDICES] = self.arm_default_action.repeat(action_train.shape[0], 1)
+        return action_env
+
+    def _map_parkour_action_to_env(self, action_train: torch.Tensor, action_dim: int) -> torch.Tensor:
         if action_train.shape[-1] != self.LEG_ACTION_DIM:
             raise ValueError(f"Expected {self.LEG_ACTION_DIM}, got {action_train.shape[-1]}")
 
@@ -487,6 +535,7 @@ class AlgSolution:
             self._unsafe_steps += 1
             if self._last_safe_action_env is not None:
                 return self._last_safe_action_env.clone()
+            raise RuntimeError("Unsafe parkour action before any safe action")
         else:
             self._unsafe_steps = 0
 
@@ -527,28 +576,67 @@ class AlgSolution:
         proprio = obs["proprio"].to(self.device)
         self._maybe_switch_for_spin(proprio)
 
-        if self.active_policy == "official" and self.official_policy is not None:
-            policy_obs = self._extract_official_obs(obs, action_dim)
-            action_train = self._policy_forward(self.official_policy, policy_obs)
-        else:
-            policy_obs = self._extract_parkour_obs(obs, action_dim)
-            action_train = self._policy_forward(self.policy, policy_obs)
+        official_obs = None
+        official_action_train = None
+        official_action_env = None
+        if self.official_policy is not None:
+            official_obs = self._extract_official_obs(obs, action_dim)
+            official_action_train = self._policy_forward(self.official_policy, official_obs)
+            official_action_env = self._map_official_action_to_env(official_action_train, action_dim)
 
-        if self._raw_action_is_unsafe(action_train):
-            self._unsafe_steps += 1
-            if self._unsafe_steps >= 30:
-                self._switch_to_official("invalid_or_extreme_action")
-        else:
-            self._unsafe_steps = 0
+        parkour_obs = None
+        parkour_action_train = None
+        parkour_action_env = None
+        if self._parkour_disable_reason is None:
+            try:
+                parkour_obs = self._extract_parkour_obs(obs, action_dim)
+                parkour_action_train = self._policy_forward(self.policy, parkour_obs)
+                if self._raw_action_is_unsafe(parkour_action_train):
+                    self._unsafe_steps += 1
+                    self._parkour_enabled = False
+                    self._parkour_disable_reason = "raw_action"
+                    if self.parkour_debug:
+                        print(
+                            "[PARKOUR-DISABLED] "
+                            f"reason=raw_action max_abs={parkour_action_train.abs().max().item():.2f}"
+                        )
+                else:
+                    self._unsafe_steps = 0
+                    self._parkour_enabled = True
+                    if self.parkour_blend > 0.0 or self.official_policy is None:
+                        parkour_action_env = self._map_parkour_action_to_env(parkour_action_train, action_dim)
+            except Exception as exc:
+                self._parkour_enabled = False
+                self._parkour_disable_reason = str(exc)
+                if self.parkour_debug:
+                    print(f"[PARKOUR-DISABLED] reason={self._parkour_disable_reason}")
 
-        action_env = self._map_action_to_env(action_train, action_dim)
+        if official_action_env is None:
+            if parkour_action_env is None:
+                raise RuntimeError("No usable policy action: official missing and parkour disabled")
+            action_env = parkour_action_env
+            action_train = parkour_action_train
+            policy_obs = parkour_obs
+            self.active_policy = "parkour"
+        elif parkour_action_env is not None and self.parkour_blend > 0.0:
+            blend = self.parkour_blend
+            action_env = (1.0 - blend) * official_action_env + blend * parkour_action_env
+            action_train = official_action_train
+            policy_obs = official_obs
+            self.active_policy = f"blend{blend:.2f}"
+        else:
+            action_env = official_action_env
+            action_train = official_action_train
+            policy_obs = official_obs
+            self.active_policy = "official"
 
         if self.parkour_debug and not self._printed_policy_action:
             values = [round(float(v), 2) for v in action_train[0].detach().cpu().tolist()]
+            parkour_status = "enabled" if self._parkour_enabled else f"disabled:{self._parkour_disable_reason}"
             print(
                 f"[POLICY-ACT] mode={self.active_policy} profile={self._selected_profile or 'official'} "
                 f"obs={tuple(policy_obs.shape)} train=[{action_train.min().item():+.2f},{action_train.max().item():+.2f}] "
-                f"mean={action_train.mean().item():+.2f} values={values}"
+                f"mean={action_train.mean().item():+.2f} parkour={parkour_status} values={values}"
             )
             self._printed_policy_action = True
 
@@ -563,7 +651,8 @@ class AlgSolution:
                 f"hip=[{hip.min().item():+.2f},{hip.max().item():+.2f}] "
                 f"thigh=[{thigh.min().item():+.2f},{thigh.max().item():+.2f}] "
                 f"calf=[{calf.min().item():+.2f},{calf.max().item():+.2f}] "
-                f"ramp_steps={self.parkour_ramp_steps} smoothing={self.parkour_action_smoothing:.2f}"
+                f"official_clip=[{self.OFFICIAL_FINAL_ENV_CLIP[0]:.2f},"
+                f"{self.OFFICIAL_FINAL_ENV_CLIP[1]:.2f},{self.OFFICIAL_FINAL_ENV_CLIP[2]:.2f}]"
             )
             self._printed_env_action = True
 
