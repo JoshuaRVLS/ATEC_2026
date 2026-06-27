@@ -24,20 +24,19 @@ class AlgSolution:
     DEFAULT_REPLAY_NAME = "task_d_manual_best.json"
     REPLAY_END_STOP_STEPS = 50
     REPLAY_END_SLOW_FORWARD = 0.25
-    PARKOUR_PROP_DIM = 53
+    PARKOUR_PROP_DIM = 45
     PARKOUR_SCAN_DIM = 5760
-    PARKOUR_PRIV_EXPLICIT_DIM = 9
-    PARKOUR_PRIV_LATENT_DIM = 29
-    PARKOUR_HISTORY_LEN = 10
+    PARKOUR_PRIV_EXPLICIT_DIM = 3
+    PARKOUR_PRIV_LATENT_DIM = 0
+    PARKOUR_HISTORY_LEN = 0
     PARKOUR_TO_ATEC_ACTION_SCALE = 0.5
     PARKOUR_IDLE_VX = 0.35
     PARKOUR_MIN_VX = 0.30
     PARKOUR_MAX_VX = 0.80
-    PARKOUR_MAX_DELTA_YAW = 1.60
-    PARKOUR_ACTION_CLIP = 2.00
-    PARKOUR_RAMP_STEPS = 25
-    PARKOUR_START_FACTOR = 0.35
-    PARKOUR_ACTION_SMOOTHING = 0.35
+    PARKOUR_ACTION_CLIP = 4.80
+    PARKOUR_RAMP_STEPS = 0
+    PARKOUR_START_FACTOR = 1.00
+    PARKOUR_ACTION_SMOOTHING = 0.00
     PARKOUR_TOTAL_OBS_DIM = (
         PARKOUR_PROP_DIM
         + PARKOUR_SCAN_DIM
@@ -98,11 +97,6 @@ class AlgSolution:
         self._vel_x = 0.0
         self._vel_y = 0.0
         self._vel_z = 0.0
-        self._parkour_history = torch.zeros(
-            (1, self.PARKOUR_HISTORY_LEN, self.PARKOUR_PROP_DIM),
-            device=self.device,
-            dtype=torch.float32,
-        )
         self._last_action_env: torch.Tensor | None = None
         self.step = 0
         self.phase = "REPLAY"
@@ -305,34 +299,16 @@ class AlgSolution:
         scale = self.train_to_env_action_scale.to(dtype=proprio.dtype)
         last_action_leg = actions_policy_leg / scale
 
-        gravity_xy = projected_gravity[:, :2]
-        zeros_1 = torch.zeros((num_envs, 1), device=self.device, dtype=proprio.dtype)
-        zeros_2 = torch.zeros((num_envs, 2), device=self.device, dtype=proprio.dtype)
-        delta_yaw_cmd = max(
-            -self.PARKOUR_MAX_DELTA_YAW,
-            min(self.PARKOUR_MAX_DELTA_YAW, self._vel_z),
-        )
-        delta_yaw = torch.full((num_envs, 1), delta_yaw_cmd, device=self.device, dtype=proprio.dtype)
-        env_non_flat = torch.ones((num_envs, 1), device=self.device, dtype=proprio.dtype)
-        env_flat = torch.zeros((num_envs, 1), device=self.device, dtype=proprio.dtype)
-        contact_fill = torch.zeros((num_envs, 4), device=self.device, dtype=proprio.dtype)
         cmd = self._get_velocity_commands(proprio)
 
         prop = torch.cat(
             [
                 base_ang_vel * 0.25,
-                gravity_xy,
-                zeros_1,
-                delta_yaw,
-                delta_yaw,
-                zeros_2,
-                cmd[:, 0:1],
-                env_non_flat,
-                env_flat,
+                projected_gravity,
+                cmd,
                 joint_pos_leg,
                 joint_vel_leg * 0.05,
                 last_action_leg,
-                contact_fill,
             ],
             dim=-1,
         )
@@ -362,35 +338,12 @@ class AlgSolution:
             scan = torch.nan_to_num(scan, nan=0.0, posinf=1.0, neginf=-1.0)
             scan = torch.clamp(scan, -1.0, 1.0)
 
-        if self._parkour_history.shape[0] != num_envs or self._parkour_history.dtype != proprio.dtype:
-            self._parkour_history = torch.zeros(
-                (num_envs, self.PARKOUR_HISTORY_LEN, self.PARKOUR_PROP_DIM),
-                device=self.device,
-                dtype=proprio.dtype,
-            )
-        if self.step <= 1:
-            history = torch.stack([prop] * self.PARKOUR_HISTORY_LEN, dim=1)
-        else:
-            history = torch.cat([self._parkour_history[:, 1:], prop.unsqueeze(1)], dim=1)
-        self._parkour_history = history.detach()
-
-        priv_explicit = torch.cat(
-            [
-                base_lin_vel * 2.0,
-                torch.zeros((num_envs, 6), device=self.device, dtype=proprio.dtype),
-            ],
-            dim=-1,
-        )
-        priv_latent = torch.zeros(
-            (num_envs, self.PARKOUR_PRIV_LATENT_DIM), device=self.device, dtype=proprio.dtype
-        )
+        priv_explicit = base_lin_vel * 2.0
         policy_obs = torch.cat(
             [
                 prop,
                 scan,
                 priv_explicit,
-                priv_latent,
-                history.reshape(num_envs, -1),
             ],
             dim=-1,
         )
