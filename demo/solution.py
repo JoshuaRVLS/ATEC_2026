@@ -24,7 +24,7 @@ class AlgSolution:
     DEFAULT_REPLAY_NAME = "task_d_manual_best.json"
     REPLAY_END_STOP_STEPS = 50
     REPLAY_END_SLOW_FORWARD = 0.25
-    PARKOUR_PROP_DIM = 45
+    PARKOUR_PROP_DIM = 53
     PARKOUR_SCAN_DIM = 5760
     PARKOUR_PRIV_EXPLICIT_DIM = 3
     PARKOUR_PRIV_LATENT_DIM = 0
@@ -300,15 +300,28 @@ class AlgSolution:
         last_action_leg = actions_policy_leg / scale
 
         cmd = self._get_velocity_commands(proprio)
+        imu_roll_pitch = projected_gravity[:, :2]
+        zeros_1 = torch.zeros((num_envs, 1), device=self.device, dtype=proprio.dtype)
+        zeros_2 = torch.zeros((num_envs, 2), device=self.device, dtype=proprio.dtype)
+        env_non_flat = torch.ones((num_envs, 1), device=self.device, dtype=proprio.dtype)
+        env_flat = torch.zeros((num_envs, 1), device=self.device, dtype=proprio.dtype)
+        contact_fill = torch.full((num_envs, 4), -0.5, device=self.device, dtype=proprio.dtype)
 
         prop = torch.cat(
             [
                 base_ang_vel * 0.25,
-                projected_gravity,
-                cmd,
+                imu_roll_pitch,
+                zeros_1,
+                zeros_1,
+                zeros_1,
+                zeros_2,
+                cmd[:, 0:1],
+                env_non_flat,
+                env_flat,
                 joint_pos_leg,
                 joint_vel_leg * 0.05,
                 last_action_leg,
+                contact_fill,
             ],
             dim=-1,
         )
